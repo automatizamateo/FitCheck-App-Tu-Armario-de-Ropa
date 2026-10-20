@@ -55,8 +55,8 @@ export async function discardDraft(): Promise<void> {
 }
 
 /** Keeps the photo about to be processed until processing finishes, for Retry after a crash. */
-export async function savePendingPhoto(view: View, image: Blob): Promise<void> {
-  await db.pendingPhoto.put({ id: 'pending', view, image, savedAt: Date.now() })
+export async function savePendingPhoto(view: View, image: Blob, flow: 'base' | 'item' = 'base'): Promise<void> {
+  await db.pendingPhoto.put({ id: 'pending', flow, view, image, savedAt: Date.now() })
 }
 
 export async function getPendingPhoto(): Promise<PendingPhoto | undefined> {

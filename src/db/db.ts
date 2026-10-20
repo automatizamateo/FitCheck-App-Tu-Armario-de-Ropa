@@ -1,6 +1,17 @@
 import { Dexie, type EntityTable } from 'dexie'
 import { DEFAULT_STYLES } from '../domain/attributes'
-import type { BaseModel, BaseModelDraft, Item, MlSettings, Outfit, PendingPhoto, Settings, Style, WearLogEntry } from '../domain/types'
+import type {
+  BaseModel,
+  BaseModelDraft,
+  Item,
+  ItemDraft,
+  MlSettings,
+  Outfit,
+  PendingPhoto,
+  Settings,
+  Style,
+  WearLogEntry,
+} from '../domain/types'
 import { LIGHT_SEGMENTATION_MODEL } from '../ml/models'
 
 export const DEFAULT_ML_SETTINGS: MlSettings = {
@@ -28,6 +39,7 @@ export class FitCheckDB extends Dexie {
   baseModel!: EntityTable<BaseModel, 'id'>
   baseModelDraft!: EntityTable<BaseModelDraft, 'id'>
   pendingPhoto!: EntityTable<PendingPhoto, 'id'>
+  itemDraft!: EntityTable<ItemDraft, 'id'>
   items!: EntityTable<Item, 'id'>
   outfits!: EntityTable<Outfit, 'id'>
   wearLog!: EntityTable<WearLogEntry, 'id'>
@@ -75,6 +87,9 @@ export class FitCheckDB extends Dexie {
             delete ml.refineCrashed
           }),
       )
+
+    // v4 (Phase 3): item being added, resumable after a crash.
+    this.version(4).stores({ itemDraft: 'id' })
 
     this.on('populate', (tx) => {
       void tx.table('styles').bulkAdd([...DEFAULT_STYLES])

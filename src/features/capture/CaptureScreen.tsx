@@ -18,6 +18,8 @@ interface CaptureScreenProps {
   onCaptured: (photo: Blob) => void
   onClose: () => void
   onShowTips: () => void
+  /** Offered when a view is optional (items can be saved with fewer than 3 views). */
+  onSkip?: () => void
 }
 
 function readTimer(): Timer {
@@ -29,7 +31,7 @@ function readTimer(): Timer {
   }
 }
 
-export function CaptureScreen({ view, step, tip, overlay, onCaptured, onClose, onShowTips }: CaptureScreenProps) {
+export function CaptureScreen({ view, step, tip, overlay, onCaptured, onClose, onShowTips, onSkip }: CaptureScreenProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const boxRef = useRef<HTMLDivElement>(null)
   const [facing, setFacing] = useState<'environment' | 'user'>('environment')
@@ -290,17 +292,24 @@ export function CaptureScreen({ view, step, tip, overlay, onCaptured, onClose, o
             </button>
           </div>
         </div>
-        {!cameraError && (
-          <div className="flex justify-center pb-2">
-            <button
-              type="button"
-              onClick={() => {
-                setFacing((f) => (f === 'environment' ? 'user' : 'environment'))
-              }}
-              className="h-11 rounded-full px-4 text-xs text-white/70"
-            >
-              Switch camera
-            </button>
+        {(!cameraError || onSkip) && (
+          <div className="flex justify-center gap-2 pb-2">
+            {!cameraError && (
+              <button
+                type="button"
+                onClick={() => {
+                  setFacing((f) => (f === 'environment' ? 'user' : 'environment'))
+                }}
+                className="h-11 rounded-full px-4 text-xs text-white/70"
+              >
+                Switch camera
+              </button>
+            )}
+            {onSkip && (
+              <button type="button" onClick={onSkip} className="h-11 rounded-full px-4 text-xs text-white/70">
+                Skip {view} view
+              </button>
+            )}
           </div>
         )}
       </div>

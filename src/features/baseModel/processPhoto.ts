@@ -2,7 +2,7 @@ import type { MlSettings, PoseLandmarks } from '../../domain/types'
 import { getSettings, updateMlSettings } from '../../db/settings'
 import { debugLog } from '../../lib/debugLog'
 import { EDGE_WORK_SIDE, smoothMaskEdges, type Guide } from '../../lib/mask/edges'
-import { blendBoundary, cleanupMask, iou, threshold } from '../../lib/mask/ops'
+import { area, blendBoundary, cleanupMask, iou, threshold } from '../../lib/mask/ops'
 import { resizeMask } from '../../lib/mask/resample'
 import { isIOS } from '../../lib/platform'
 import { formatResources, releaseCanvas, trackBitmap } from '../../lib/resources'
@@ -19,6 +19,7 @@ import {
   resolveSegmentationConfig,
   shouldRefine,
 } from '../../ml/mlConfig'
+import { PERSON_CLASSES } from '../../ml/models'
 import type { LoadInfo } from '../../ml/providers'
 import type { PipelineSession } from '../../ml/session'
 
@@ -31,6 +32,20 @@ export interface StageUpdate {
   total?: number
 }
 
+/** What the pipeline is looking for. */
+export interface PipelineTarget {
+  flow: 'base' | 'item'
+  /** Clothes-parsing classes to keep, or null to skip segmentation and start from an empty mask (brush only). */
+  classes: readonly number[] | null
+  /** Optional SlimSAM refinement (base model only; still opt-in on iOS). */
+  allowRefine: boolean
+}
+
+export const PERSON_TARGET: PipelineTarget = { flow: 'base', classes: PERSON_CLASSES, allowRefine: true }
+
+/** Below this share of the photo, the garment was not found and the user paints it instead. */
+const MIN_FOUND_SHARE = 0.003
+
 export interface ProcessedPhoto {
   mask: Uint8Array // 0/1 person mask at the photo's resolution
   width: number
@@ -38,6 +53,8 @@ export interface ProcessedPhoto {
   landmarks: PoseLandmarks
   timings: Partial<Record<StageId, number>>
   notes: string[] // things the user should know (skipped steps, slow refinement, no pose found)
+  /** True when nothing was found (or segmentation was skipped): review starts in Add mode. */
+  empty: boolean
 }
 
 /** Browser-dependent helpers, replaceable in tests. */
@@ -98,16 +115,18 @@ export async function processPhoto(
   photo: ImageBitmap,
   onStage: (update: StageUpdate) => void,
   deps: PipelineDeps = browserDeps,
+  target: PipelineTarget = PERSON_TARGET,
 ): Promise<ProcessedPhoto> {
   const ml = session.settings
   const { width, height } = photo
   const timings: ProcessedPhoto['timings'] = {}
   const notes: string[] = []
-  const refine = shouldRefine(ml, deps.ios)
+  const refine = target.allowRefine && shouldRefine(ml, deps.ios)
   const resolved = resolveSegmentationConfig(ml, deps.ios)
   debugLog('pipeline start', {
+    flow: target.flow,
     photo: `${width}×${height}`,
-    model: resolved.modelId,
+    model: target.classes ? resolved.modelId : 'none (brush only)',
     device: resolved.device === 'auto' ? 'auto (WebGPU, else WASM)' : resolved.device,
     dtype: resolved.dtype === 'auto' ? 'auto (fp16 on WebGPU, q8 on WASM)' : resolved.dtype,
     refine,
@@ -117,37 +136,54 @@ export async function processPhoto(
     webgpuBroken: ml.webgpuBroken ?? false,
   })
 
-  // 1. Person mask
-  const seg = session.segmentation()
-  const segInfo = await guardMl({ stage: 'segment', step: 'load', modelId: seg.modelId }, () =>
-    seg.load((loaded, total) => {
-      onStage({ stage: 'segment', status: 'downloading', loaded, total })
-    }),
-  )
-  await rememberBackend(ml, segInfo)
-  onStage({ stage: 'segment', status: 'running' })
-  const segResult = await guardMl({ stage: 'segment', step: 'run', modelId: seg.modelId, device: segInfo.device }, async () =>
-    seg.segmentGroups(await deps.copy(photo), [[...seg.personClasses]]),
-  )
-  timings.segment = segResult.ms
-  const prob = segResult.masks[0]
-  if (!prob) throw new Error('Segmentation returned no mask')
-  let mask = cleanupMask(threshold(prob), width, height)
-
-  // 1b. Cheap edge cleanup (no second model). Any failure keeps the plain SegFormer mask.
-  try {
-    const coarse = mask
-    mask = await guardMl({ stage: 'segment', step: 'post' }, () =>
-      Promise.resolve(smoothMaskEdges(coarse, width, height, deps.luminance(photo, EDGE_WORK_SIDE))),
+  // 1. Mask of what we are looking for (the person, or the garment's classes)
+  let mask: Uint8Array
+  let empty = false
+  if (!target.classes) {
+    mask = new Uint8Array(width * height)
+    empty = true
+    onStage({ stage: 'segment', status: 'skipped' })
+  } else {
+    const classes = [...target.classes]
+    const seg = session.segmentation()
+    const segInfo = await guardMl({ flow: target.flow, stage: 'segment', step: 'load', modelId: seg.modelId }, () =>
+      seg.load((loaded, total) => {
+        onStage({ stage: 'segment', status: 'downloading', loaded, total })
+      }),
     )
-  } catch {
-    /* logged by guardMl */
-  }
-  onStage({ stage: 'segment', status: 'done' })
+    await rememberBackend(ml, segInfo)
+    onStage({ stage: 'segment', status: 'running' })
+    const segResult = await guardMl(
+      { flow: target.flow, stage: 'segment', step: 'run', modelId: seg.modelId, device: segInfo.device },
+      async () => seg.segmentGroups(await deps.copy(photo), [classes]),
+    )
+    timings.segment = segResult.ms
+    const prob = segResult.masks[0]
+    if (!prob) throw new Error('Segmentation returned no mask')
+    mask = cleanupMask(threshold(prob), width, height)
 
-  // Only one model in memory at a time: free SegFormer (sessions, GPU device, worker) before pose loads.
-  await guardMl({ stage: 'segment', step: 'unload' }, () => session.unloadSegmentation()).catch(() => undefined)
-  debugLog(`segment.unloaded ${formatResources()}`)
+    // 1b. Cheap edge cleanup (no second model). Any failure keeps the plain SegFormer mask.
+    if (area(mask) < MIN_FOUND_SHARE * width * height) {
+      empty = true
+      notes.push('Couldn’t find it in this photo. Paint it with the brush (Add), or retake the photo.')
+    } else {
+      try {
+        const coarse = mask
+        mask = await guardMl({ flow: target.flow, stage: 'segment', step: 'post' }, () =>
+          Promise.resolve(smoothMaskEdges(coarse, width, height, deps.luminance(photo, EDGE_WORK_SIDE))),
+        )
+      } catch {
+        /* logged by guardMl */
+      }
+    }
+    onStage({ stage: 'segment', status: 'done' })
+
+    // Only one model in memory at a time: free SegFormer (sessions, GPU device, worker) before pose loads.
+    await guardMl({ flow: target.flow, stage: 'segment', step: 'unload' }, () => session.unloadSegmentation()).catch(
+      () => undefined,
+    )
+    debugLog(`segment.unloaded ${formatResources()}`)
+  }
 
   // 2. Pose, before any refinement. Optional: without it the user aligns clothes by hand.
   let landmarks: PoseLandmarks = {}
@@ -155,7 +191,7 @@ export async function processPhoto(
     notes.push('Pose detection is off on this device, so you’ll line clothes up by hand. You can turn it on in Settings → Advanced.')
     onStage({ stage: 'pose', status: 'skipped' })
   } else {
-    const pose = await detectPose(session, photo, onStage, deps, notes)
+    const pose = await detectPose(session, photo, onStage, deps, notes, target)
     if (pose) {
       landmarks = pose.landmarks
       timings.pose = pose.ms
@@ -164,7 +200,7 @@ export async function processPhoto(
 
   // 3. Optional SlimSAM refinement
   if (refine) {
-    const refined = await refineWithSam(session, photo, mask, onStage, deps, notes)
+    const refined = await refineWithSam(session, photo, mask, onStage, deps, notes, target)
     if (refined) {
       mask = refined.mask
       timings.refine = refined.ms
@@ -179,7 +215,7 @@ export async function processPhoto(
     await updateMlSettings({ iosVerifiedRuns: runs })
   }
   debugLog(`pipeline done ${formatResources()}`, { notes: notes.length })
-  return { mask, width, height, landmarks, timings, notes }
+  return { mask, width, height, landmarks, timings, notes, empty }
 }
 
 /**
@@ -192,6 +228,7 @@ async function detectPose(
   onStage: (update: StageUpdate) => void,
   deps: PipelineDeps,
   notes: string[],
+  target: PipelineTarget,
 ): Promise<{ landmarks: PoseLandmarks; ms: number } | null> {
   const ml = session.settings
   const abort = () => {
@@ -199,7 +236,7 @@ async function detectPose(
   }
   try {
     const pose = session.poseDetector()
-    await guardMl({ stage: 'pose', step: 'load' }, () =>
+    await guardMl({ flow: target.flow, stage: 'pose', step: 'load' }, () =>
       withTimeout(
         pose.load((loaded, total) => {
           onStage({ stage: 'pose', status: 'downloading', loaded, total })
@@ -211,7 +248,7 @@ async function detectPose(
     )
     onStage({ stage: 'pose', status: 'running' })
     const small = await deps.copy(photo, POSE_MAX_SIDE)
-    const res = await guardMl({ stage: 'pose', step: 'run' }, () =>
+    const res = await guardMl({ flow: target.flow, stage: 'pose', step: 'run' }, () =>
       withTimeout(pose.detect(small), deps.poseTimeoutMs, 'Detecting pose', abort),
     )
     if (!res.landmarks.leftShoulder || !res.landmarks.rightHip) {
@@ -225,7 +262,7 @@ async function detectPose(
     onStage({ stage: 'pose', status: 'failed' })
     return null
   } finally {
-    await guardMl({ stage: 'pose', step: 'unload' }, () => session.unloadPose()).catch(() => undefined)
+    await guardMl({ flow: target.flow, stage: 'pose', step: 'unload' }, () => session.unloadPose()).catch(() => undefined)
     debugLog(`pose.unloaded ${formatResources()}`)
   }
 }
@@ -241,6 +278,7 @@ async function refineWithSam(
   onStage: (update: StageUpdate) => void,
   deps: PipelineDeps,
   notes: string[],
+  target: PipelineTarget,
 ): Promise<{ mask: Uint8Array; ms: number } | null> {
   const ml = session.settings
   const { width, height } = photo
@@ -249,7 +287,7 @@ async function refineWithSam(
     const abort = () => {
       session.releaseRefiner()
     }
-    const info = await guardMl({ stage: 'refine', step: 'load' }, () =>
+    const info = await guardMl({ flow: target.flow, stage: 'refine', step: 'load' }, () =>
       withTimeout(
         refiner.load((loaded, total) => {
           onStage({ stage: 'refine', status: 'downloading', loaded, total })
@@ -264,7 +302,7 @@ async function refineWithSam(
     const sw = small.width
     const sh = small.height
     const smallMask = resizeMask(mask, width, height, sw, sh)
-    const result = await guardMl({ stage: 'refine', step: 'run', modelId: info.modelId, device: info.device }, () =>
+    const result = await guardMl({ flow: target.flow, stage: 'refine', step: 'run', modelId: info.modelId, device: info.device }, () =>
       withTimeout(refiner.refine(small, smallMask, sw, sh), deps.refineTimeoutMs, 'Refining edges', abort),
     )
     const fine = resizeMask(result.mask, sw, sh, width, height)

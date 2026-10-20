@@ -132,3 +132,30 @@ The debug log showed the page dying at `▶ pose.load` with no `✓`, after B2 h
 - **Pose crash recovery:** the first page kill during pose drops straight to **B0 + WASM** (two rungs at once). A second kill in a row turns pose detection **off** (`skipPose`), with a clear notice. Settings → Advanced → Detect pose turns it back on. A successful pose resets the counter.
 - **Resource log:** every `▶`/`✓`/`✗` line ends with `[wN bN cN X MB]`: live workers, ImageBitmaps and canvases we created, and the MB of their pixels (plus `heap` on Chrome; Safari has no `performance.memory`). Closed or transferred bitmaps report 0×0 and released canvases are set to 0×0, so they drop out of the count.
 - **Review screen memory:** the brush editor now uses **one** full-size canvas that holds the cut-out itself (photo pixels, alpha = mask), replacing the separate mask and cut-out layers. The preview canvas only exists while previewing and is freed afterwards, and all canvases are freed when the screen closes. Undo is **diff-based**: each step stores only the XOR of the changed bounding box (RLE), capped at **2 MB** total, with the oldest steps dropped first. The viewport canvas is capped at **2× DPR** (44 % fewer pixels than 3× on iPhone). Temporary encoder canvases are freed as soon as their blob is made.
+
+## Phase 3A — Add item flow (2026-10-20)
+
+### Flow
+Category (Accessories → Cap / Hat, Necklace, Scarf, or Other with an optional custom label) → capture front, side, back (same camera, base-model silhouette overlay, self-timer, Library; any view can be skipped) → processing → brush review → fit on the base model → details → save → "Add another" (the last category stays highlighted) or Done.
+
+- **Draft (Dexie v4 `itemDraft`):** each view is saved as soon as it's fitted, so a crash or Cancel loses nothing. Opening Add item again offers "Continue" or "Start a new item". The photo being processed is kept in `pendingPhoto` (now tagged `flow: 'item'`), and crash markers carry `flow`. After a crash during an item, the add-item flow shows the same recovery screen, and the base-model flow ignores it.
+- **Same ML pipeline as the base model** (`processPhoto` with a `PipelineTarget`): the same crash markers, step log with memory breadcrumbs, one model in memory at a time, and safe iOS defaults (B0 → B2 on CPU, never GPU automatically). Garments never use SlimSAM (`allowRefine: false`).
+
+### Finding the garment (SPEC §6.3)
+- Classes by category: tops → Upper-clothes + Dress; Pants/Shorts → Pants + Skirt; Shoes → Left/Right-shoe; Cap/Hat → Hat; Scarf → Scarf. SegFormer returns one probability map for exactly those classes, which goes through the same threshold → cleanup → cheap edge cleanup as the base model.
+- **Socks, Necklace, Other:** there is no reliable class, so segmentation is skipped entirely (no model loads). Review opens with an empty mask in **Add** mode and a hint to paint. The same happens when a parsed garment covers less than 0.3 % of the photo ("Couldn't find it… paint it").
+- Tap-to-select is not in this flow yet (that is 3C, behind a lab test).
+
+### Alignment
+- **Pose (preferred):** a least-squares similarity (closed-form 2D Procrustes) from the garment photo's landmarks to the base view's landmarks. Tops use shoulders + hips; pants use hips, knees and ankles; shorts use hips and knees; shoes and socks use ankles, heels and toes; caps use nose, ears and shoulders; necklaces and scarves use nose, shoulders and ears; other accessories use shoulders + hips. Landmarks need visibility ≥ 0.5 in both photos. Rotation is clamped to ±15°. Results with a scale outside 0.5–2 are rejected, because both photos are taken from the same spot.
+- **Fallback (no pose, or rejected):** the cut-out is fitted, keeping its aspect ratio, into the category's body region, given as fractions of the base person's bounding box (from the base cut-out's alpha). For example, tops cover 15–55 % of the height and shoes 92–100 %. It is centered horizontally and top-aligned. The fit screen says it was placed by body area.
+- **Fine-tune screen:** the base model stays fixed. One finger drags the garment; two fingers scale and rotate it (the same gesture layer as Phase 2). It has Reset and See-through (55 % opacity).
+- **Stored as SPEC §5:** `bbox` is the automatic placement without rotation, in base-view pixels. `transform` is the fine-tune about the bbox center: the offset of the center, extra scale, and rotation, including any automatic rotation. `layerToSimilarity()` in `lib/align.ts` turns a layer into the drawing matrix. Only the image's aspect ratio matters, so it doesn't depend on the encoded size. Phase 4 adds the outfit override on top.
+
+### Saving (SPEC §7)
+- The cut-out is cropped to the mask's bounding box plus the feather, with alpha from the mask (Sharp/Soft/Softer feather from review). It is encoded as WebP 0.8, with PNG where Safari can't encode WebP. Photos are at most 1200 px, so crops are too.
+- The thumbnail is made from the first available view, at 240 px, as WebP 0.7.
+- The original JPEG is stored per view only when **Keep original photos** is on.
+- Items can be saved with 1–3 views. The details form and the done screen show a "Missing … view" badge; the wardrobe badge comes in 3B. Saving needs at least one view: if every view is skipped, the flow returns to the camera.
+- **Colors:** the cut-out is decoded at 96 px. Each opaque pixel is matched to the nearest of the 16 palette swatches in CIE Lab, and colors covering ≥ 15 % are suggested (at most 3; the top one always). The name is pre-filled as "<top color> <category>" (e.g. "Navy T-Shirt") until the user edits it.
+- `LayeredView` draws the base model with garment layers; the done screen uses it now, and item detail and outfits will later. Bitmaps are decoded once and closed on unmount, and the canvas is capped at 2× DPR.

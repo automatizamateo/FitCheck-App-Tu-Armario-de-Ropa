@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState, type ReactNode } from 'react'
 import type { PoseLandmarks, View } from '../../domain/types'
 import { MaskEditor, type MaskEditorApi, type MaskEditorState } from './MaskEditor'
+import type { BrushMode } from './maskEditorEngine'
 
 interface ReviewScreenProps {
   view: View
@@ -11,6 +12,10 @@ interface ReviewScreenProps {
   busy: boolean
   onRetake: () => void
   onConfirm: (mask: Uint8Array, feather: number) => void
+  /** 'add' when nothing was found and the user paints the garment from scratch. */
+  initialMode?: BrushMode
+  title?: string
+  confirmLabel?: string
 }
 
 const FEATHERS = [
@@ -19,10 +24,22 @@ const FEATHERS = [
   { label: 'Softer', px: 2 },
 ] as const
 
-export function ReviewScreen({ view, photo, mask, landmarks, notes, busy, onRetake, onConfirm }: ReviewScreenProps) {
+export function ReviewScreen({
+  view,
+  photo,
+  mask,
+  landmarks,
+  notes,
+  busy,
+  onRetake,
+  onConfirm,
+  initialMode = 'erase',
+  title = `Review ${view}`,
+  confirmLabel = 'Use this photo',
+}: ReviewScreenProps) {
   const api = useRef<MaskEditorApi | null>(null)
   const [state, setState] = useState<MaskEditorState>({
-    mode: 'erase',
+    mode: initialMode,
     brushSize: 32,
     showPose: false,
     preview: false,
@@ -44,7 +61,7 @@ export function ReviewScreen({ view, photo, mask, landmarks, notes, busy, onReta
       <div className="pt-safe px-safe flex h-[calc(env(safe-area-inset-top)+3.5rem)] items-center justify-between">
         <span className="w-16" />
         <div className="text-center">
-          <p className="text-[15px] font-semibold">Review {view}</p>
+          <p className="text-[15px] font-semibold">{title}</p>
           <p className="text-xs text-white/60">Pinch to zoom · double-tap to fit</p>
         </div>
         <button
@@ -175,7 +192,7 @@ export function ReviewScreen({ view, photo, mask, landmarks, notes, busy, onReta
             }}
             className="h-12 flex-[2] rounded-full bg-white text-[15px] font-semibold text-black disabled:opacity-40"
           >
-            {busy ? 'Saving…' : 'Use this photo'}
+            {busy ? 'Saving…' : confirmLabel}
           </button>
         </div>
       </div>

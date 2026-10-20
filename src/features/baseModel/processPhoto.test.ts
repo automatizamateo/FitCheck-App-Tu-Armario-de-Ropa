@@ -5,7 +5,7 @@ import { readDebugLog } from '../../lib/debugLog'
 import type { EdgeRefiner, LoadInfo, PoseProvider, SegmentationProvider } from '../../ml/providers'
 import type { PipelineSession } from '../../ml/session'
 import { memoryStorage } from '../../test/memoryStorage'
-import { processPhoto, type PipelineDeps, type StageUpdate } from './processPhoto'
+import { processPhoto, type PipelineDeps, type PipelineTarget, type StageUpdate } from './processPhoto'
 
 const settings = vi.hoisted(() => ({
   updateMlSettings: vi.fn(() => Promise.resolve()),
@@ -129,10 +129,10 @@ function fakeSession(opts: FakeOptions = {}) {
   return { session, calls }
 }
 
-async function run(opts: FakeOptions = {}, d: Partial<PipelineDeps> = {}) {
+async function run(opts: FakeOptions = {}, d: Partial<PipelineDeps> = {}, target?: PipelineTarget) {
   const { session, calls } = fakeSession(opts)
   const stages: StageUpdate[] = []
-  const result = await processPhoto(session, fakeBitmap(), (u) => stages.push(u), { ...deps, ...d })
+  const result = await processPhoto(session, fakeBitmap(), (u) => stages.push(u), { ...deps, ...d }, target)
   const final = (id: string) => stages.filter((s) => s.stage === id).at(-1)?.status
   return { result, calls, final }
 }
@@ -314,5 +314,54 @@ describe('processPhoto: crash markers and log', () => {
       expect(log.some((m) => new RegExp(`^▶ ${escaped}.* \\[w\\d+ b\\d+ c\\d+ [\\d.]+MB.*\\]$`).test(m))).toBe(true)
       expect(log.some((m) => new RegExp(`^✓ ${escaped} \\d+ ms \\[w\\d+ b\\d+ c\\d+ [\\d.]+MB.*\\]$`).test(m))).toBe(true)
     }
+  })
+})
+
+describe('processPhoto: garments (add item)', () => {
+  const brushOnly: PipelineTarget = { flow: 'item', classes: null, allowRefine: false }
+
+  it('brush-only categories skip segmentation, still detect pose, and start empty', async () => {
+    const { result, calls, final } = await run({}, {}, brushOnly)
+    expect(calls).toEqual(['pose.load', `pose.run ${W}×${H}`, 'pose.unload'])
+    expect(final('segment')).toBe('skipped')
+    expect(result.empty).toBe(true)
+    expect(result.mask.every((v) => v === 0)).toBe(true)
+    expect(result.landmarks).toEqual(LANDMARKS)
+  })
+
+  it('segments only the requested classes, and says so when the garment is not found', async () => {
+    const segmentRun = vi.fn()
+    const { session } = fakeSession()
+    const seg = session.segmentation()
+    seg.segmentGroups = (_image, groups) => {
+      segmentRun(groups)
+      return Promise.resolve({ masks: [new Uint8Array(W * H)], width: W, height: H, ms: 1 })
+    }
+    const result = await processPhoto(session, fakeBitmap(), () => undefined, deps, {
+      flow: 'item',
+      classes: [4, 7],
+      allowRefine: true,
+    })
+    expect(segmentRun).toHaveBeenCalledWith([[4, 7]])
+    expect(result.empty).toBe(true)
+    expect(result.notes.join(' ')).toMatch(/Paint it with the brush/)
+  })
+
+  it('never refines garments, even with Refine edges on', async () => {
+    const { calls } = await run({ ml: { refineEdges: 'on' } }, {}, { flow: 'item', classes: [4], allowRefine: false })
+    expect(calls.some((c) => c.startsWith('refine'))).toBe(false)
+  })
+
+  it('tags crash markers with the flow so recovery reopens add-item', async () => {
+    const flows: string[] = []
+    const storage = memoryStorage()
+    const setItem = storage.setItem.bind(storage)
+    storage.setItem = (k, v) => {
+      if (k === 'fitcheck-ml-inflight') flows.push((JSON.parse(v) as { info: { flow: string } }).info.flow)
+      setItem(k, v)
+    }
+    vi.stubGlobal('localStorage', storage)
+    await run({}, {}, brushOnly)
+    expect(new Set(flows)).toEqual(new Set(['item']))
   })
 })

@@ -2,10 +2,10 @@ import { createHashRouter, Navigate } from 'react-router'
 import { AppShell } from './components/AppShell'
 import { OnboardingGate } from './components/OnboardingGate'
 import { BaseModelFlow } from './features/baseModel/BaseModelFlow'
+import { AddItemFlow } from './features/items/AddItemFlow'
 import { SegmentationLab } from './lab/SegmentationLab'
 import { OnboardingFlow } from './onboarding/OnboardingFlow'
 import { CalendarPage } from './pages/CalendarPage'
-import { ComingSoonPage } from './pages/ComingSoonPage'
 import { InsightsPage } from './pages/InsightsPage'
 import { OutfitsPage } from './pages/OutfitsPage'
 import { SettingsPage } from './pages/SettingsPage'
@@ -21,15 +21,7 @@ export const router = createHashRouter([
       { path: '/base-model', element: <BaseModelFlow /> },
       // Hidden ML spike screen: tap the version line in Settings 5 times.
       { path: '/lab/segmentation', element: <SegmentationLab /> },
-      {
-        path: '/items/new',
-        element: (
-          <ComingSoonPage
-            title="Adding items is coming soon"
-            body="Capturing clothes and cutting them out arrives in an upcoming update."
-          />
-        ),
-      },
+      { path: '/items/new', element: <AddItemFlow /> },
       {
         element: <AppShell />,
         children: [

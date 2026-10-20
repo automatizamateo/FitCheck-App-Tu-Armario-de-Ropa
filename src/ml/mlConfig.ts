@@ -52,6 +52,8 @@ export function shouldRefine(ml: MlSettings, ios: boolean): boolean {
 export type MlStage = 'segment' | 'pose' | 'refine'
 
 export interface InFlightMl {
+  /** Which capture flow was running, so recovery reopens the right one (missing = base model). */
+  flow?: 'base' | 'item'
   stage: MlStage
   step?: 'load' | 'run' | 'post' | 'unload'
   modelId?: string

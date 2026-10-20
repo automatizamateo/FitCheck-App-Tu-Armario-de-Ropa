@@ -86,3 +86,40 @@ Before you start: update the installed app (open it twice, or delete it and re-a
 
 ### Report back
 For each of the 3 views: total seconds, gpu/wasm, refine time, and anything wrong with the cut-out or the gestures.
+
+## Phase 3A — Add item
+
+Before you start: update the app (open it twice). Your base model must exist. Stand in the same spot as for your base model, wearing the item.
+
+### Flow and speed
+- [ ] Wardrobe → **+** opens "What are you adding?" with 9 categories. Accessories asks for Cap / Hat, Necklace, Scarf, or Other (with an optional label).
+- [ ] The camera shows your **base model** for that view as a faint overlay, says "<Item> · 1 of 3", and has the self-timer, Library and **Skip <view> view**.
+- [ ] After processing: review (brush) → **Fit** screen → next view → **Details** → **Save item** → "Saved …" with the garment on your base model → **Add another** goes back to the categories with the last one highlighted.
+
+### Per category (SPEC acceptance: T-shirt, pants, shoes, socks, necklace)
+For each one, note whether the cut-out was found automatically, how much brushing it needed, and whether the fit was right before you touched it:
+- [ ] **T-shirt:** "Finding the t-shirt" runs, and review shows only the shirt (not arms or face).
+- [ ] **Pants:** only the pants. **Shorts** too, if you have some.
+- [ ] **Shoes:** both shoes.
+- [ ] **Socks** and **Necklace:** no "Finding…" step. Review opens in **Add** mode with a hint; paint the item (pinch to zoom for the necklace chain).
+- [ ] **Cap / Hat** or **Scarf**, if you have one.
+
+### Fit on the base model
+- [ ] With your pose visible, the garment lands roughly in the right place (shoulders, waist, feet, neck).
+- [ ] One finger drags it, two fingers scale and twist it. **Reset** goes back to the automatic fit, and **See-through** shows your base model through it.
+- [ ] Cover your shoulders/legs, or use a photo without a person (e.g. the item on a hanger from Library): it says "placed by body area" and puts it in a sensible region.
+
+### Saving, colors, missing views
+- [ ] Details: the name is pre-filled (e.g. "Navy T-Shirt") and the color swatches are pre-selected; both are editable. Styles, seasons, brand, notes and favorite work.
+- [ ] Skip side and back on one item: Details shows **Missing side, back view**, and it saves.
+- [ ] Skipping all three views goes back to the camera with "Add at least one view".
+
+### Robustness
+- [ ] **Resume:** after fitting the front view, force-quit. Wardrobe → + offers **Continue your …?**, and Continue goes to the side view.
+- [ ] **Debug log** (Settings → Advanced): the item photo shows `pipeline start {"flow":"item",…}`. Socks and necklaces show `"model":"none (brush only)"`, and you see `item front aligned by pose` (or `body area`).
+- [ ] If the app reloads by itself while processing an item, the recovery screen appears inside Add item (not the base model), and **Retry** works.
+- [ ] **Offline:** in Airplane Mode, add an item. Everything works.
+
+### Report back
+For each test item: category, how long processing took, whether it was found automatically, whether the auto fit was right, and approximate brushing/adjusting needed.
+

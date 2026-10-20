@@ -16,9 +16,11 @@ interface ProcessingScreenProps {
   error: string | null
   onRetry: () => void
   onRetake: () => void
+  /** Steps to show and their names (default: the base model's three). */
+  labels?: Partial<Record<StageId, string>>
 }
 
-export function ProcessingScreen({ photo, stages, error, onRetry, onRetake }: ProcessingScreenProps) {
+export function ProcessingScreen({ photo, stages, error, onRetry, onRetake, labels = LABELS }: ProcessingScreenProps) {
   const [url, setUrl] = useState<string | null>(null)
 
   useEffect(() => {
@@ -63,8 +65,8 @@ export function ProcessingScreen({ photo, stages, error, onRetry, onRetake }: Pr
           ) : (
             <>
               <ul className="space-y-3">
-                {(Object.keys(LABELS) as StageId[]).map((id) => (
-                  <StageRow key={id} label={LABELS[id]} update={stages[id]} />
+                {(Object.keys(labels) as StageId[]).map((id) => (
+                  <StageRow key={id} label={labels[id] ?? id} update={stages[id]} />
                 ))}
               </ul>
               {downloading && (

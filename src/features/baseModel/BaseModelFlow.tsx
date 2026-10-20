@@ -68,7 +68,7 @@ export function BaseModelFlow() {
     let cancelled = false
     const isCancelled = () => cancelled
     void (async () => {
-      const [settings, draft, base, pending] = await Promise.all([
+      const [settings, draft, base, kept] = await Promise.all([
         getSettings(),
         getDraft(),
         db.baseModel.get('base'),
@@ -77,7 +77,10 @@ export function BaseModelFlow() {
       if (isCancelled()) return
       session.current = new MlSession(settings.ml)
       const remaining = retakeView ? [retakeView] : VIEWS.filter((v) => !draft?.views[v])
-      const recovery = readRecovery()
+      // Recoveries and kept photos from the add-item flow are handled there.
+      const stored = readRecovery()
+      const recovery = stored && (stored.crashed.flow ?? 'base') === 'base' ? stored : null
+      const pending = kept && (kept.flow ?? 'base') === 'base' ? kept : undefined
       setQueue(remaining)
       const silhouettes: Partial<Record<View, Blob>> = {}
       for (const v of VIEWS) {

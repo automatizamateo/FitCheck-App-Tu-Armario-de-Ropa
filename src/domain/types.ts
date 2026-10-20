@@ -69,6 +69,7 @@ export interface BaseModelDraft {
 /** The photo being processed, kept so "Retry" works after iOS kills the page mid-processing. */
 export interface PendingPhoto {
   id: 'pending'
+  flow?: 'base' | 'item' // missing = base model
   view: View
   image: Blob // JPEG of the downscaled photo
   savedAt: number
@@ -82,9 +83,20 @@ export interface BaseModel {
 }
 
 export interface GarmentLayer {
-  image: Blob
-  bbox: { x: number; y: number; w: number; h: number }
-  transform: Transform
+  image: Blob // WebP with alpha (PNG fallback), cropped to the garment
+  bbox: { x: number; y: number; w: number; h: number } // auto placement in base-model view pixels
+  transform: Transform // fine-tune about the bbox center (see lib/align.ts layerToSimilarity)
+  original?: Blob // only when Settings.keepOriginalPhotos
+}
+
+/** An item being added; each confirmed view is saved right away so a crash loses nothing. */
+export interface ItemDraft {
+  id: 'draft'
+  category: Category
+  accessoryType?: string
+  views: Partial<Record<View, GarmentLayer>>
+  skipped: View[]
+  startedAt: number
 }
 
 export interface Item {
