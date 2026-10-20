@@ -1,13 +1,17 @@
 import { Outlet, useLocation } from 'react-router'
 import { MlNotice } from '../features/ml/MlNotice'
-import { AddItemFab } from './AddItemFab'
+import { Fab } from './Fab'
 import { InstallBanner } from './InstallBanner'
 import { TabBar } from './TabBar'
 
-const FAB_ROUTES = ['/wardrobe', '/outfits']
+const FABS: Record<string, { to: string; label: string } | undefined> = {
+  '/wardrobe': { to: '/items/new', label: 'Add item' },
+  '/outfits': { to: '/outfits/new', label: 'New outfit' },
+}
 
 export function AppShell() {
   const { pathname } = useLocation()
+  const fab = FABS[pathname]
   return (
     <div className="pt-safe min-h-dvh pb-[calc(env(safe-area-inset-bottom)+5rem)]">
       <InstallBanner />
@@ -17,7 +21,7 @@ export function AppShell() {
       <main className="mx-auto max-w-lg">
         <Outlet />
       </main>
-      {FAB_ROUTES.includes(pathname) && <AddItemFab />}
+      {fab && <Fab {...fab} />}
       <TabBar />
     </div>
   )

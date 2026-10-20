@@ -1,54 +1,72 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
+import { Chip, ChipRow, ColorSwatches, Field } from '../../components/FormBits'
+import { toggleIn as toggle } from '../../lib/toggleIn'
 import { db } from '../../db/db'
-import { COLOR_PALETTE, SEASONS } from '../../domain/attributes'
+import { SEASONS } from '../../domain/attributes'
 import { suggestName } from '../../domain/garments'
-import { VIEWS, type ItemDraft, type Season } from '../../domain/types'
+import type { Category, Season, View } from '../../domain/types'
 import { useObjectUrl } from '../../lib/useObjectUrl'
 import { suggestColors } from './garmentImage'
 import type { ItemDetails } from './store'
 
 interface DetailsFormProps {
-  draft: ItemDraft
+  category: Category
+  accessoryType?: string
+  /** Cut-out shown at the top (and the source of suggested colors for a new item). */
+  image: Blob | undefined
+  missing: readonly View[]
+  /** Editing an existing item: its current details, and nothing is auto-suggested. */
+  initial?: ItemDetails
+  title?: string
+  saveLabel?: string
   busy: boolean
   error: string | null
   onSave: (details: ItemDetails) => void
   onCancel: () => void
 }
 
-export function DetailsForm({ draft, busy, error, onSave, onCancel }: DetailsFormProps) {
+export function DetailsForm({
+  category,
+  accessoryType,
+  image,
+  missing,
+  initial,
+  title = 'Details',
+  saveLabel = 'Save item',
+  busy,
+  error,
+  onSave,
+  onCancel,
+}: DetailsFormProps) {
   const styles = useLiveQuery(() => db.styles.toArray(), [], [])
-  const firstView = VIEWS.map((v) => draft.views[v]).find(Boolean)
-  const preview = useObjectUrl(firstView?.image)
-  const missing = VIEWS.filter((v) => !draft.views[v])
+  const preview = useObjectUrl(image)
 
-  const [name, setName] = useState(() => suggestName(draft.category, draft.accessoryType, undefined))
+  const [name, setName] = useState(() => initial?.name ?? suggestName(category, accessoryType, undefined))
   const nameEdited = useRef(false)
-  const [styleIds, setStyleIds] = useState<string[]>([])
-  const [seasons, setSeasons] = useState<Season[]>([])
-  const [colors, setColors] = useState<string[]>([])
-  const [brand, setBrand] = useState('')
-  const [notes, setNotes] = useState('')
-  const [favorite, setFavorite] = useState(false)
+  const [styleIds, setStyleIds] = useState<string[]>(initial?.styleIds ?? [])
+  const [seasons, setSeasons] = useState<Season[]>(initial?.seasons ?? [])
+  const [colors, setColors] = useState<string[]>(initial?.colors ?? [])
+  const [brand, setBrand] = useState(initial?.brand ?? '')
+  const [notes, setNotes] = useState(initial?.notes ?? '')
+  const [favorite, setFavorite] = useState(initial?.favorite ?? false)
+  const suggest = !initial
 
-  // Suggest colors (and a name like "Navy T-Shirt") from the cut-out; the user can change both.
+  // New item: suggest colors (and a name like "Navy T-Shirt") from the cut-out; the user can change both.
   useEffect(() => {
-    if (!firstView) return
+    if (!suggest || !image) return
     let cancelled = false
-    void suggestColors(firstView.image)
+    void suggestColors(image)
       .then((found) => {
         if (cancelled) return
         setColors(found)
-        if (!nameEdited.current) setName(suggestName(draft.category, draft.accessoryType, found[0]))
+        if (!nameEdited.current) setName(suggestName(category, accessoryType, found[0]))
       })
       .catch(() => undefined)
     return () => {
       cancelled = true
     }
-  }, [firstView, draft.category, draft.accessoryType])
-
-  const toggle = <T,>(list: T[], value: T) =>
-    list.includes(value) ? list.filter((v) => v !== value) : [...list, value]
+  }, [suggest, image, category, accessoryType])
 
   return (
     <div className="bg-canvas text-ink fixed inset-0 z-50 overflow-y-auto">
@@ -57,7 +75,7 @@ export function DetailsForm({ draft, busy, error, onSave, onCancel }: DetailsFor
           <button type="button" onClick={onCancel} className="text-muted -ml-2 h-11 px-2 text-[15px]">
             Cancel
           </button>
-          <p className="font-semibold">Details</p>
+          <p className="font-semibold">{title}</p>
           <span className="w-14" />
         </div>
 
@@ -67,8 +85,8 @@ export function DetailsForm({ draft, busy, error, onSave, onCancel }: DetailsFor
           </div>
           <div className="min-w-0">
             <p className="text-muted text-sm">
-              {draft.category}
-              {draft.accessoryType ? ` · ${draft.accessoryType}` : ''}
+              {category}
+              {accessoryType ? ` · ${accessoryType}` : ''}
             </p>
             {missing.length > 0 && (
               <p className="mt-1 inline-block rounded-full bg-amber-100 px-2.5 py-1 text-xs font-medium text-amber-900 dark:bg-amber-900 dark:text-amber-100">
@@ -122,25 +140,13 @@ export function DetailsForm({ draft, busy, error, onSave, onCancel }: DetailsFor
           </ChipRow>
         </Field>
 
-        <Field label="Colors" hint="Suggested from the photo">
-          <div className="grid grid-cols-8 gap-2">
-            {COLOR_PALETTE.map((c) => {
-              const active = colors.includes(c.name)
-              return (
-                <button
-                  key={c.name}
-                  type="button"
-                  aria-label={c.name}
-                  aria-pressed={active}
-                  onClick={() => {
-                    setColors((l) => toggle(l, c.name))
-                  }}
-                  className={`aspect-square rounded-full border transition active:scale-90 ${active ? 'ring-accent ring-2 ring-offset-2 ring-offset-[var(--color-canvas)]' : 'border-line'}`}
-                  style={{ background: c.hex }}
-                />
-              )
-            })}
-          </div>
+        <Field label="Colors" hint={suggest ? 'Suggested from the photo' : undefined}>
+          <ColorSwatches
+            selected={colors}
+            onToggle={(c) => {
+              setColors((l) => toggle(l, c))
+            }}
+          />
           {colors.length > 0 && <p className="text-muted mt-2 text-xs">{colors.join(', ')}</p>}
         </Field>
 
@@ -193,39 +199,10 @@ export function DetailsForm({ draft, busy, error, onSave, onCancel }: DetailsFor
             }}
             className="bg-ink text-canvas h-12 w-full rounded-full text-[15px] font-semibold disabled:opacity-40"
           >
-            {busy ? 'Saving…' : 'Save item'}
+            {busy ? 'Saving…' : saveLabel}
           </button>
         </div>
       </div>
     </div>
-  )
-}
-
-function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
-  return (
-    <div className="mt-5">
-      <p className="mb-2 text-sm font-semibold">
-        {label}
-        {hint && <span className="text-muted font-normal"> · {hint}</span>}
-      </p>
-      {children}
-    </div>
-  )
-}
-
-function ChipRow({ children }: { children: ReactNode }) {
-  return <div className="flex flex-wrap gap-2">{children}</div>
-}
-
-function Chip({ active, onClick, children }: { active: boolean; onClick: () => void; children: ReactNode }) {
-  return (
-    <button
-      type="button"
-      aria-pressed={active}
-      onClick={onClick}
-      className={`h-10 rounded-full px-4 text-sm font-medium transition active:scale-95 ${active ? 'bg-ink text-canvas' : 'bg-surface border-line border'}`}
-    >
-      {children}
-    </button>
   )
 }

@@ -146,3 +146,36 @@ export function layerToSimilarity(
   const fineTune = about(center, t.scale, t.rotation, t.dx, t.dy)
   return compose(fineTune, place)
 }
+
+/** Center of a placed layer in base-view pixels: the bbox center moved by the item's fine-tune. */
+export function layerCenter(layer: Pick<GarmentLayer, 'bbox' | 'transform'>): Point {
+  const { bbox, transform: t } = layer
+  return { x: bbox.x + bbox.w / 2 + t.dx, y: bbox.y + bbox.h / 2 + t.dy }
+}
+
+export const IDENTITY_TRANSFORM: Transform = { dx: 0, dy: 0, scale: 1, rotation: 0 }
+
+/** An outfit override as a matrix in base-view pixels: scale and rotate about `center`, then move. */
+export function overrideToSimilarity(o: Transform, center: Point): Similarity {
+  return about(center, o.scale, o.rotation, o.dx, o.dy)
+}
+
+/** Inverse of overrideToSimilarity for the same center. */
+export function similarityToOverride(s: Similarity, center: Point): Transform {
+  const moved = apply(s, center)
+  return { dx: moved.x - center.x, dy: moved.y - center.y, scale: scaleOf(s), rotation: rotationOf(s) }
+}
+
+/**
+ * The matrix that draws a layer inside an outfit (SPEC §10): bbox + item transform, then the
+ * outfit's per-view override about the layer's center. Image pixels → base-view pixels.
+ */
+export function outfitLayerMatrix(
+  layer: Pick<GarmentLayer, 'bbox' | 'transform'>,
+  imgW: number,
+  imgH: number,
+  override?: Transform,
+): Similarity {
+  const m = layerToSimilarity(layer, imgW, imgH)
+  return override ? compose(overrideToSimilarity(override, layerCenter(layer)), m) : m
+}

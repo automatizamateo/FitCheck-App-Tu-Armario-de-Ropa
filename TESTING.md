@@ -123,3 +123,44 @@ For each one, note whether the cut-out was found automatically, how much brushin
 ### Report back
 For each test item: category, how long processing took, whether it was found automatically, whether the auto fit was right, and approximate brushing/adjusting needed.
 
+
+## Phase 3B + Outfits — iPhone checklist
+
+Update first: open the app, close it from the app switcher, and open it again.
+
+### Wardrobe
+- [ ] The items you added in 3A are in the grid with their thumbnails. Badges: ★ for favorites, **n/3 views** when views are missing, **Unused** (set the threshold to 1 day in Settings later to see it).
+- [ ] The category chips only show categories you have. Search finds items by name or brand (try lower case and without accents).
+- [ ] **Filters**: try favorites, unused, style, season and color, plus the four sorts. "Filters (n)" shows the count. Open an item and go back: the filters are still set. If nothing matches, **Clear filters** appears.
+- [ ] Scroll quickly through the grid. It stays smooth, and nothing reloads or flashes.
+- [ ] The + on Wardrobe opens **Add item** (camera).
+
+### Item detail
+- [ ] Tap an item: it is on your base model, and Front / Side / Back switch views. A missing view shows **Add <view> view**.
+- [ ] ☆/★ toggles favorite, and the grid updates.
+- [ ] **Edit details**: the values are filled in; change the name, colors and brand, then save.
+- [ ] **Retake side view** (or **Add side view**): camera → fit → you're back on the item, with the new view (and the new thumbnail if it was the front view). Cancel on the camera leaves the item unchanged.
+- [ ] **Delete**: with the item in 2 outfits, one of which has only this item, the sheet names both. After deleting, one outfit is gone and the other no longer has the item (and its thumbnail is redone).
+
+### Outfits
+- [ ] With an empty wardrobe (test on a fresh install, or just read the text): "Add items to your wardrobe first" with **Go to Wardrobe**.
+- [ ] The + on **Outfits** opens **New outfit**, never the camera.
+- [ ] Builder: tap items in the bottom tabs to put them on.
+  - Pants then another pants (or shorts) **swaps** them, with a message.
+  - A shirt plus a jacket stack.
+  - A cap plus a necklace stack.
+  - Items appear in the right order: shoes over pants, jacket over shirt.
+- [ ] Tap an item on the canvas: a dashed box selects it. Drag it, pinch it and twist it; then try **Forward / Backward**, **Reset** and **Remove**. Tap the background to deselect.
+- [ ] Swipe left/right on the background, or use the buttons, to switch Front / Side / Back. Adjustments made on the front don't move the item on the side or back.
+- [ ] **Save**: a preview appears; set name, styles, seasons, occasion and favorite, then save. The outfit detail opens.
+- [ ] Outfit detail: Front/Side/Back (buttons and swipe), the item list opens the items, and **Edit** keeps your adjustments. Test **Duplicate**, ★ and **Delete**.
+- [ ] Gallery: style chips, season, occasion, ★ favorites and **Contains item…**. An item's "In outfits" opens the gallery filtered by it.
+- [ ] Item detail → "Create an outfit with this" opens the builder with that item on.
+
+### Memory / robustness
+- [ ] Build an outfit with 6–8 items and switch views 10 times. No reload.
+- [ ] The debug log (Settings → Advanced) shows `builder images … [w0 bN …]` with N about equal to the item count + 1 (one view's set only), and `▶/✓ outfit thumbnail` on save.
+- [ ] Airplane Mode: everything above works.
+
+### Report back
+Anything that felt slow (grid scroll, view switch, save), whether the selection hit the item you meant when items overlap, and any reload with the debug log.

@@ -92,6 +92,7 @@ export interface GarmentLayer {
 /** An item being added; each confirmed view is saved right away so a crash loses nothing. */
 export interface ItemDraft {
   id: 'draft'
+  itemId?: string // set when retaking or adding one view of an existing item
   category: Category
   accessoryType?: string
   views: Partial<Record<View, GarmentLayer>>
@@ -172,4 +173,10 @@ export interface Settings {
   captureTipsSeen: boolean
   ml: MlSettings
   lastBackupAt?: number
+}
+
+/** The view after `view` in `direction` (+1 = next), wrapping around; for swipes. */
+export function stepView(view: View, direction: 1 | -1): View {
+  const i = VIEWS.indexOf(view)
+  return VIEWS[(i + direction + VIEWS.length) % VIEWS.length] ?? view
 }

@@ -1,23 +1,22 @@
 import { useEffect, useRef } from 'react'
-import type { GarmentLayer } from '../domain/types'
-import { layerToSimilarity } from '../lib/align'
-import { compose, fit, type Similarity } from '../lib/gesture/similarity'
-import { trackBitmap } from '../lib/resources'
+import { outfitLayerMatrix } from '../lib/align'
+import { setMatrix, type BaseImage, type CompositeLayer } from '../lib/composite'
+import { compose, fit } from '../lib/gesture/similarity'
+import { releaseCanvas, trackBitmap } from '../lib/resources'
 
-export interface BaseImage {
-  image: Blob
-  width: number
-  height: number
-}
+export type { BaseImage } from '../lib/composite'
 
 interface LayeredViewProps {
   base: BaseImage
-  /** Drawn in this order (sort by layer before passing). */
-  layers: Pick<GarmentLayer, 'image' | 'bbox' | 'transform'>[]
+  /** Drawn in this order (sort by layer before passing). Pass a memoized array: a new one re-decodes. */
+  layers: readonly CompositeLayer[]
   className?: string
 }
 
-/** The base model with garment layers on top, fitted to the element. Decodes once; frees bitmaps on unmount. */
+/**
+ * The base model with garment layers on top, fitted to the element. Decodes one image set; frees
+ * the bitmaps when the inputs change (e.g. switching view) or on unmount.
+ */
 export function LayeredView({ base, layers, className = '' }: LayeredViewProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
 
@@ -36,31 +35,31 @@ export function LayeredView({ base, layers, className = '' }: LayeredViewProps) 
       canvas.width = Math.round(w * dpr)
       canvas.height = Math.round(h * dpr)
       const view = fit(base.width, base.height, w, h)
-      const set = (t: Similarity) => {
-        ctx.setTransform(dpr * t.a, dpr * t.b, -dpr * t.b, dpr * t.a, dpr * t.tx, dpr * t.ty)
-      }
       ctx.clearRect(0, 0, canvas.width, canvas.height)
-      set(view)
+      setMatrix(ctx, view, dpr)
       ctx.drawImage(baseBmp, 0, 0, base.width, base.height)
       layerBmps.forEach((bmp, i) => {
         const layer = layers[i]
         if (!layer) return
-        set(compose(view, layerToSimilarity(layer, bmp.width, bmp.height)))
+        setMatrix(ctx, compose(view, outfitLayerMatrix(layer, bmp.width, bmp.height, layer.override)), dpr)
         ctx.drawImage(bmp, 0, 0)
       })
     }
     void Promise.all(
       [base.image, ...layers.map((l) => l.image)].map(async (b) => trackBitmap(await createImageBitmap(b))),
-    ).then((decoded) => {
-      if (cancelled) {
-        decoded.forEach((b) => {
-          b.close()
-        })
-        return
-      }
-      bitmaps = decoded
-      draw()
-    })
+    ).then(
+      (decoded) => {
+        if (cancelled) {
+          decoded.forEach((b) => {
+            b.close()
+          })
+          return
+        }
+        bitmaps = decoded
+        draw()
+      },
+      () => undefined,
+    )
     const observer = new ResizeObserver(draw)
     observer.observe(canvas)
     return () => {
@@ -69,7 +68,7 @@ export function LayeredView({ base, layers, className = '' }: LayeredViewProps) 
       bitmaps.forEach((b) => {
         b.close()
       })
-      canvas.width = canvas.height = 0
+      releaseCanvas(canvas)
     }
   }, [base, layers])
 

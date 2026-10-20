@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useNavigate } from 'react-router'
+import { useNavigate, useSearchParams } from 'react-router'
 import { LayeredView } from '../../components/LayeredView'
 import { db } from '../../db/db'
 import { getSettings, updateMlSettings } from '../../db/settings'
@@ -21,17 +21,21 @@ import { CaptureTips } from '../capture/CaptureTips'
 import { ProcessingScreen, type StageMap } from '../capture/ProcessingScreen'
 import { ReviewScreen } from '../capture/ReviewScreen'
 import { MlNotice } from '../ml/MlNotice'
+import { refreshOutfitThumbnails } from '../outfits/store'
 import { AlignScreen } from './AlignScreen'
 import { CategoryPicker } from './CategoryPicker'
 import { DetailsForm } from './DetailsForm'
 import { cropCutout, makeThumbnail, personBox } from './garmentImage'
 import {
+  applyRetakeDraft,
   discardItemDraft,
   getItemDraft,
   saveItemDraftView,
   saveItemFromDraft,
   skipItemDraftView,
   startItemDraft,
+  startRetakeDraft,
+  thumbnailView,
   type ItemDetails,
 } from './store'
 
@@ -47,6 +51,7 @@ type Phase =
   | { name: 'loading' }
   | { name: 'noBase' }
   | { name: 'resume' }
+  | { name: 'conflict'; item: Item; view: View }
   | { name: 'category' }
   | { name: 'capture' }
   | { name: 'tips' }
@@ -71,6 +76,10 @@ function nextView(draft: ItemDraft): View | undefined {
 
 export function AddItemFlow() {
   const navigate = useNavigate()
+  const [params] = useSearchParams()
+  // ?retake=<itemId>&view=<view>: retake (or add a missing) view of an existing item.
+  const retakeId = params.get('retake')
+  const retakeView = params.get('view') as View | null
   const [phase, setPhase] = useState<Phase>({ name: 'loading' })
   const [base, setBase] = useState<BaseModel | null>(null)
   const [draft, setDraft] = useState<ItemDraft | null>(null)
@@ -114,6 +123,24 @@ export function AddItemFlow() {
         return
       }
       if (kept?.flow === 'item') void clearPendingPhoto()
+      if (retakeId && retakeView && VIEWS.includes(retakeView)) {
+        const item = await db.items.get(retakeId)
+        if (isCancelled()) return
+        if (!item) {
+          void navigate('/wardrobe', { replace: true })
+          return
+        }
+        const same = saved !== undefined && saved.itemId === item.id && nextView(saved) === retakeView
+        if (saved && !same) {
+          setPhase({ name: 'conflict', item, view: retakeView })
+          return
+        }
+        const d = saved ?? (await startRetakeDraft(item, retakeView))
+        if (isCancelled()) return
+        setDraft(d)
+        setPhase({ name: 'capture' })
+        return
+      }
       setPhase(saved ? { name: 'resume' } : { name: 'category' })
     })()
     return () => {
@@ -121,7 +148,7 @@ export function AddItemFlow() {
       session.current?.dispose()
       session.current = null
     }
-  }, [])
+  }, [retakeId, retakeView, navigate])
 
   const showToast = (message: string) => {
     setToast(message)
@@ -130,24 +157,56 @@ export function AddItemFlow() {
     }, 3500)
   }
 
-  /** After a view was confirmed or skipped: next view, or the details form. */
-  const advance = useCallback((d: ItemDraft) => {
-    setDraft(d)
-    if (nextView(d)) {
-      setPhase({ name: 'capture' })
-      return
-    }
-    if (Object.keys(d.views).length === 0) {
-      // Everything was skipped: at least one view is needed to save.
-      const reset = { ...d, skipped: [] }
-      void db.itemDraft.put(reset)
-      setDraft(reset)
-      showToast('Add at least one view to save this item.')
-      setPhase({ name: 'capture' })
-      return
-    }
-    setPhase({ name: 'details', busy: false, error: null })
-  }, [])
+  /** Retake done: the new view goes into the item; thumbnails that showed the old one are redone. */
+  const finishRetake = useCallback(
+    async (d: ItemDraft) => {
+      const item = d.itemId ? await db.items.get(d.itemId) : undefined
+      const retaken = VIEWS.find((v) => d.views[v])
+      const layer = retaken && d.views[retaken]
+      try {
+        if (!item || !retaken || !layer) throw new Error('This item was deleted')
+        const shownView = thumbnailView({ ...item.views, [retaken]: layer })
+        const thumbnail = shownView === retaken ? await makeThumbnail(layer.image) : undefined
+        const { itemId } = await applyRetakeDraft(thumbnail)
+        debugLog(`item ${retaken} view retaken`, { thumbnail: thumbnail !== undefined })
+        const outfits = await db.outfits.where('itemIds').equals(itemId).primaryKeys()
+        void refreshOutfitThumbnails(outfits)
+        void navigate(`/wardrobe/${itemId}`, { replace: true })
+      } catch (err) {
+        await discardItemDraft()
+        showToast(err instanceof Error ? err.message : String(err))
+        void navigate('/wardrobe', { replace: true })
+      }
+    },
+    [navigate],
+  )
+
+  /** After a view was confirmed or skipped: next view, the details form, or back to the retaken item. */
+  const advance = useCallback(
+    (d: ItemDraft) => {
+      setDraft(d)
+      if (nextView(d)) {
+        setPhase({ name: 'capture' })
+        return
+      }
+      if (d.itemId) {
+        setPhase({ name: 'loading' })
+        void finishRetake(d)
+        return
+      }
+      if (Object.keys(d.views).length === 0) {
+        // Everything was skipped: at least one view is needed to save.
+        const reset = { ...d, skipped: [] }
+        void db.itemDraft.put(reset)
+        setDraft(reset)
+        showToast('Add at least one view to save this item.')
+        setPhase({ name: 'capture' })
+        return
+      }
+      setPhase({ name: 'details', busy: false, error: null })
+    },
+    [finishRetake],
+  )
 
   const run = useCallback(
     async (photo: ImageBitmap) => {
@@ -276,6 +335,12 @@ export function AddItemFlow() {
   }
 
   const close = () => {
+    if (draft?.itemId) {
+      // Cancelling a retake keeps the item as it was.
+      void discardItemDraft()
+      void navigate(`/wardrobe/${draft.itemId}`, { replace: true })
+      return
+    }
     // The draft is kept: opening "Add item" again offers to continue it.
     void navigate('/wardrobe')
   }
@@ -300,11 +365,41 @@ export function AddItemFlow() {
         />
       )
 
+    case 'conflict':
+      return (
+        <Sheet
+          title={`Finish your ${noun.toLowerCase()} first?`}
+          body={`You have an unfinished ${noun.toLowerCase()}. Retaking the ${phase.view} view of “${phase.item.name}” discards it.`}
+          primary={{
+            label: 'Continue the unfinished one',
+            onClick: () => {
+              void navigate('/items/new', { replace: true })
+            },
+          }}
+          secondary={{
+            label: 'Discard it and retake',
+            onClick: () => {
+              const { item, view: v } = phase
+              void discardItemDraft()
+                .then(() => startRetakeDraft(item, v))
+                .then((d) => {
+                  setDraft(d)
+                  setPhase({ name: 'capture' })
+                })
+            },
+          }}
+        />
+      )
+
     case 'resume':
       return (
         <Sheet
           title={`Continue your ${noun.toLowerCase()}?`}
-          body={`You have ${Object.keys(draft?.views ?? {}).length} of 3 views done.`}
+          body={
+            draft?.itemId
+              ? `You were retaking the ${view ?? ''} view of an item.`
+              : `You have ${Object.keys(draft?.views ?? {}).length} of 3 views done.`
+          }
           primary={{
             label: 'Continue',
             onClick: () => {
@@ -368,7 +463,10 @@ export function AddItemFlow() {
     case 'details':
       return draft ? (
         <DetailsForm
-          draft={draft}
+          category={draft.category}
+          accessoryType={draft.accessoryType}
+          image={VIEWS.map((v) => draft.views[v]?.image).find(Boolean)}
+          missing={VIEWS.filter((v) => !draft.views[v])}
           busy={phase.busy}
           error={phase.error}
           onSave={(d) => void save(d)}
@@ -420,7 +518,7 @@ export function AddItemFlow() {
         <CaptureScreen
           key={view}
           view={view}
-          step={`${noun} · ${stepIndex} of 3`}
+          step={draft.itemId ? `${noun} · retake ${view}` : `${noun} · ${stepIndex} of 3`}
           tip={TIPS[view]}
           overlay={base.views[view].image}
           onCaptured={(b) => void onCaptured(b)}
@@ -428,9 +526,13 @@ export function AddItemFlow() {
           onShowTips={() => {
             setPhase({ name: 'tips' })
           }}
-          onSkip={() => {
-            void skipItemDraftView(view).then(advance)
-          }}
+          onSkip={
+            draft.itemId
+              ? undefined
+              : () => {
+                  void skipItemDraftView(view).then(advance)
+                }
+          }
         />
       )}
       {phase.name === 'processing' && (
