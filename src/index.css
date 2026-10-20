@@ -1,0 +1,77 @@
+@import 'tailwindcss';
+
+@theme {
+  --font-sans: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', system-ui, sans-serif;
+
+  --color-canvas: #f5f2ee;
+  --color-surface: #ffffff;
+  --color-ink: #1c1917;
+  --color-muted: #78716c;
+  --color-line: #e7e2dc;
+  --color-accent: #b25a3c;
+  --color-accent-ink: #ffffff;
+  --color-accent-soft: #f3e3db;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-canvas: #151311;
+    --color-surface: #211e1b;
+    --color-ink: #f5f2ee;
+    --color-muted: #a8a29e;
+    --color-line: #34302c;
+    --color-accent: #d97a58;
+    --color-accent-ink: #1c1917;
+    --color-accent-soft: #3a2a22;
+  }
+}
+
+@utility pt-safe {
+  padding-top: env(safe-area-inset-top);
+}
+@utility pb-safe {
+  padding-bottom: env(safe-area-inset-bottom);
+}
+@utility px-safe {
+  padding-left: max(1rem, env(safe-area-inset-left));
+  padding-right: max(1rem, env(safe-area-inset-right));
+}
+
+@layer base {
+  html {
+    color-scheme: light dark;
+    -webkit-text-size-adjust: 100%;
+    -webkit-tap-highlight-color: transparent;
+  }
+  body {
+    @apply bg-canvas text-ink font-sans antialiased;
+    overscroll-behavior-y: none;
+  }
+  /* iOS zooms into inputs smaller than 16px. */
+  input,
+  select,
+  textarea {
+    font-size: 16px;
+  }
+  button {
+    cursor: pointer;
+    -webkit-touch-callout: none;
+    user-select: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
