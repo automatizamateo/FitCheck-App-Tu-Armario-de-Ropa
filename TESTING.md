@@ -34,3 +34,22 @@ Run on a real iPhone (iOS 16.4 or later) against the GitHub Pages URL. Later pha
 
 ### Updates
 - [ ] After a new deploy, the app updates within one or two launches.
+
+## Phase 2 spike — segmentation lab
+
+Open it with **Settings → tap the version line at the bottom 5 times**. Use a full-body photo of a person on a plain background.
+
+For each combination, write down the load time, the time for the first "Segment" run and the "Run 5×" times, whether it crashed, and how good the masks look:
+
+| Model | Device | Precision |
+| --- | --- | --- |
+| B2 | auto (should pick webgpu) | fp16 |
+| B2 | wasm | q8 |
+| B0 | webgpu | fp16 |
+| B0 | wasm | q8 |
+
+- [ ] The download progress bar shows MB, and the second load of the same model is fast because it comes from the cache.
+- [ ] "Model cache" lists the model `.onnx` and `ort-wasm-simd-threaded*.wasm`.
+- [ ] **Offline:** with a model downloaded, turn on Airplane Mode, force-quit the app, reopen it, open the lab, then load the same model and segment. It works.
+- [ ] **Memory:** run "Run 5×" three times in a row with B2 on each device. If the app reloads by itself, a red notice appears at the top of the lab next time.
+- [ ] Check the "classes" and "cutout" views: does the person cut-out look clean? Are T-shirt, pants and shoes labelled correctly?

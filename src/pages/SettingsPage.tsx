@@ -1,5 +1,6 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
+import { useNavigate } from 'react-router'
 import { BulletList, PhotoTipsList } from '../components/InfoContent'
 import { PRIVACY_POINTS } from '../content/info'
 import { InstallInstructions } from '../components/InstallInstructions'
@@ -89,11 +90,26 @@ export function SettingsPage() {
           </Disclosure>
         </Section>
 
-        <p className="text-muted text-center text-xs">
-          {APP_CONFIG.name} {__APP_VERSION__} · Works offline · No data leaves this device
-        </p>
+        <VersionFooter />
       </div>
     </>
+  )
+}
+
+/** Tapping the version 5 times opens the hidden segmentation lab. */
+function VersionFooter() {
+  const navigate = useNavigate()
+  const taps = useRef({ count: 0, last: 0 })
+  const onTap = () => {
+    const now = Date.now()
+    taps.current.count = now - taps.current.last < 600 ? taps.current.count + 1 : 1
+    taps.current.last = now
+    if (taps.current.count >= 5) void navigate('/lab/segmentation')
+  }
+  return (
+    <p className="text-muted text-center text-xs" onClick={onTap}>
+      {APP_CONFIG.name} {__APP_VERSION__} · Works offline · No data leaves this device
+    </p>
   )
 }
 

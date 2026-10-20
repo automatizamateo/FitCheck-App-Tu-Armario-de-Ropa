@@ -34,3 +34,35 @@
 - **Onboarding step 5 (base model) is a placeholder** until Phase 2. Finishing onboarding sets `onboardingDone` and calls `navigator.storage.persist()`. In Phase 2, the app will send the user to base model creation whenever no base model exists.
 - The "+ Add item" button opens a "coming soon" screen until Phase 3.
 - Accent color: terracotta `#b25a3c` (light) / `#d97a58` (dark) on a warm neutral background.
+
+### Fixes found during Phase 2 spike
+- The service worker now sets `clientsClaim` + `skipWaiting`. Without them, the first visit was not controlled by the service worker until the app was relaunched, so going offline straight after the first visit failed.
+- `manifest.webmanifest` was precached twice (by the glob and by the plugin). The glob no longer includes it.
+
+## Phase 2 — ML spike (2026-10-20)
+
+### Segmentation model: `Xenova/segformer_b2_clothes` (spike default), with `segformer_b0_clothes` for comparison
+Checked on Hugging Face on 2026-10-20:
+
+| Model | q8 | fp16 | fp32 | Notes |
+| --- | --- | --- | --- | --- |
+| segformer_b2_clothes (Xenova ONNX of mattmdjaga) | 28.8 MB | 55.5 MB | 110 MB | ~430k downloads/month for the original; best accuracy of the ONNX options |
+| segformer_b0_clothes (Xenova ONNX) | 4.4 MB | 7.9 MB | 15.2 MB | Same 18 ATR labels, much smaller, less accurate |
+| segformer_b3_clothes (sayeed99) | — | — | — | No ONNX weights, so not usable without converting it ourselves |
+
+- Both models output the 18 ATR labels the spec needs: Upper-clothes, Pants, Skirt, Dress, Left/Right-shoe, Hat, Scarf, and so on. "Everything except Background" gives the person mask for the base model.
+- Input is 512×512 and output logits are 128×128. The worker upsamples the logits bilinearly to a mask of at most 512 or 1024 px on the long side, then takes the argmax.
+- **License caveat:** the b2 model card says its license is NVIDIA's SegFormer license, which allows non-commercial use "for research or evaluation purposes only". The b0 card says MIT, but it is fine-tuned from the same NVIDIA pretrained weights. FitCheck is personal, non-commercial and shared only with family, so this is a judgement call for the owner. **Permissive fallback if needed:** MODNet (Apache-2.0, 6.6 MB q8) for person/background removal plus SlimSAM (Apache-2.0, ~14 MB q8) for tap-to-select garments. That loses automatic per-category pre-selection.
+
+### Runtime
+- **Transformers.js 4.3.1** (Apache-2.0), which uses onnxruntime-web 1.31.0-dev. WebGPU is on by default in Safari 26 (iOS 26). WASM is the fallback.
+- Device "auto" requests a WebGPU adapter **inside the worker**. If there is none, or the model fails to load on WebGPU, it falls back to WASM and shows the reason. The spike lets you force each device and precision so we can measure on a real iPhone.
+- **WASM runs single-threaded.** Multithreading needs cross-origin isolation (COOP/COEP headers), which GitHub Pages cannot send, and Safari lacks `COEP: credentialless`, so a service-worker workaround would also block the Hugging Face downloads.
+- Inference runs in a module Web Worker. The photo is decoded and downscaled to at most 1200 px on the main thread (`createImageBitmap` with resize, so 48 MP photos are never decoded at full size) and transferred to the worker as an `ImageBitmap`. Tensors are disposed after each run, and "Unload" terminates the worker.
+
+### Offline caching
+- **ONNX Runtime WASM is served from our origin** (`/ort/`, copied from `node_modules` at build time) instead of jsDelivr, so the only external host is Hugging Face (`huggingface.co` plus its CDN `*.cdn.hf.co`, CORS `*`). The spec allows only that one-time model download.
+- Transformers.js stores the model files **and** the ORT WASM in Cache Storage (`transformers-cache`) on first use. Workbox does not runtime-cache them as well, because that would store every model twice. The WASM and model files are not precached, so users who never open the ML features never download them.
+- The worker bundle (545 KB) is precached, so ML works offline once the model is cached.
+- Verified in headless Chromium: the online run downloads from Hugging Face; after going offline and reloading, the model loads from cache in 0.5 s, segmentation still runs, and no external requests are made.
+- The asyncify ORT build (26.9 MB, 6.8 MB gzipped on the wire) is needed for WebGPU. The plain build (14.3 MB) is used only where `navigator.gpu` is missing, which is the same rule Transformers.js uses.
