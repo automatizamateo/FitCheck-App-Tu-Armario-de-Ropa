@@ -1,5 +1,5 @@
 import type { MlSettings } from '../domain/types'
-import { resolveRefinerConfig, resolveSegmentationConfig } from './mlConfig'
+import { resolveSegmentationConfig } from './mlConfig'
 import {
   createSegmentationProvider,
   MediaPipePoseProvider,
@@ -9,11 +9,23 @@ import {
   type SegmentationProvider,
 } from './providers'
 
+/** What the photo pipeline needs from a session (a fake implements it in tests). */
+export interface PipelineSession {
+  readonly settings: MlSettings
+  segmentation(): SegmentationProvider
+  poseDetector(): PoseProvider
+  edgeRefiner(): EdgeRefiner
+  /** Frees SegFormer and pose memory before SlimSAM loads; they reload lazily for the next photo. */
+  releaseForRefine(): void
+  releaseRefiner(): void
+}
+
 /**
  * The models used by one capture flow. Created lazily so nothing downloads until needed, kept loaded
- * between views (reloading costs seconds), and all disposed together when the flow ends.
+ * between views (reloading costs seconds), and all disposed together when the flow ends. The edge
+ * refiner is the exception: it only lives for one refine step.
  */
-export class MlSession {
+export class MlSession implements PipelineSession {
   private seg: SegmentationProvider | null = null
   private refiner: EdgeRefiner | null = null
   private pose: PoseProvider | null = null
@@ -33,7 +45,7 @@ export class MlSession {
   }
 
   edgeRefiner(): EdgeRefiner {
-    this.refiner ??= new SlimSamRefiner(resolveRefinerConfig(this.ml))
+    this.refiner ??= new SlimSamRefiner()
     return this.refiner
   }
 
@@ -42,10 +54,19 @@ export class MlSession {
     return this.pose
   }
 
-  dispose() {
+  releaseForRefine() {
     this.seg?.dispose()
-    this.refiner?.dispose()
     this.pose?.dispose()
-    this.seg = this.refiner = this.pose = null
+    this.seg = this.pose = null
+  }
+
+  releaseRefiner() {
+    this.refiner?.dispose()
+    this.refiner = null
+  }
+
+  dispose() {
+    this.releaseForRefine()
+    this.releaseRefiner()
   }
 }

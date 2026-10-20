@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router'
 import { db } from '../../db/db'
-import { getSettings, updateSettings } from '../../db/settings'
+import { getSettings, updateMlSettings, updateSettings } from '../../db/settings'
 import { VIEWS, type BaseModelView, type View } from '../../domain/types'
 import { encodeJpeg, exportCutout } from '../../lib/encode'
+import { debugLog } from '../../lib/debugLog'
 import { loadImageFile } from '../../lib/image'
+import { isIOS } from '../../lib/platform'
 import { requestPersistentStorage } from '../../lib/storage'
+import { clearRecovery, readRecovery, type PendingRecovery } from '../../ml/crashRecovery'
 import { estimateDownloadMB } from '../../ml/downloads'
 import { resolveSegmentationConfig, shouldRefine } from '../../ml/mlConfig'
 import { MlSession } from '../../ml/session'
@@ -15,7 +18,16 @@ import { CaptureTips } from '../capture/CaptureTips'
 import { ProcessingScreen, type StageMap } from '../capture/ProcessingScreen'
 import { ReviewScreen } from '../capture/ReviewScreen'
 import { processPhoto, type ProcessedPhoto } from './processPhoto'
-import { finalizeDraft, getDraft, replaceBaseModelView, saveDraftView } from './store'
+import { RecoveryScreen } from './RecoveryScreen'
+import {
+  clearPendingPhoto,
+  finalizeDraft,
+  getDraft,
+  getPendingPhoto,
+  replaceBaseModelView,
+  saveDraftView,
+  savePendingPhoto,
+} from './store'
 
 const MAX_SIDE = 1200 // SPEC §7
 
@@ -27,6 +39,7 @@ const TIPS: Record<View, string> = {
 
 type Phase =
   | { name: 'loading' }
+  | { name: 'recovery'; recovery: PendingRecovery; photo: Blob | null }
   | { name: 'tips'; then: 'capture' | 'resume' }
   | { name: 'capture' }
   | { name: 'processing'; photo: ImageBitmap; stages: StageMap; error: string | null }
@@ -54,10 +67,16 @@ export function BaseModelFlow() {
     let cancelled = false
     const isCancelled = () => cancelled
     void (async () => {
-      const [settings, draft, base] = await Promise.all([getSettings(), getDraft(), db.baseModel.get('base')])
+      const [settings, draft, base, pending] = await Promise.all([
+        getSettings(),
+        getDraft(),
+        db.baseModel.get('base'),
+        getPendingPhoto(),
+      ])
       if (isCancelled()) return
       session.current = new MlSession(settings.ml)
       const remaining = retakeView ? [retakeView] : VIEWS.filter((v) => !draft?.views[v])
+      const recovery = readRecovery()
       setQueue(remaining)
       const silhouettes: Partial<Record<View, Blob>> = {}
       for (const v of VIEWS) {
@@ -66,10 +85,18 @@ export function BaseModelFlow() {
       }
       setOverlays(silhouettes)
       const resuming = !retakeView && remaining.length < VIEWS.length
-      setPhase({ name: 'tips', then: resuming ? 'resume' : 'capture' })
+      if (recovery) {
+        // Never re-run automatically after a crash: that is how a crash loop starts.
+        const photo = pending && pending.view === remaining[0] ? pending.image : null
+        debugLog('recovery screen', { crashed: recovery.crashed.stage, hasPhoto: photo !== null })
+        setPhase({ name: 'recovery', recovery, photo })
+      } else {
+        if (pending) void clearPendingPhoto()
+        setPhase({ name: 'tips', then: resuming ? 'resume' : 'capture' })
+      }
       const est = await estimateDownloadMB(
         resolveSegmentationConfig(settings.ml),
-        shouldRefine(settings.ml),
+        shouldRefine(settings.ml, isIOS()),
         'gpu' in navigator && !settings.ml.webgpuBroken,
       )
       if (!isCancelled()) setDownloadMB(est)
@@ -86,19 +113,29 @@ export function BaseModelFlow() {
     else void navigate(-1)
   }, [navigate, fromOnboarding])
 
-  const run = useCallback(async (photo: ImageBitmap) => {
-    const s = session.current
-    if (!s) return
-    setPhase({ name: 'processing', photo, stages: {}, error: null })
-    try {
-      const result = await processPhoto(s, photo, (update) => {
-        setPhase((p) => (p.name === 'processing' ? { ...p, stages: { ...p.stages, [update.stage]: update } } : p))
-      })
-      setPhase({ name: 'review', photo, result, saving: false })
-    } catch (err) {
-      setPhase({ name: 'processing', photo, stages: {}, error: err instanceof Error ? err.message : String(err) })
-    }
-  }, [])
+  const run = useCallback(
+    async (photo: ImageBitmap) => {
+      const s = session.current
+      if (!s || !view) return
+      setPhase({ name: 'processing', photo, stages: {}, error: null })
+      try {
+        await savePendingPhoto(view, await encodeJpeg(photo, photo.width, photo.height))
+      } catch (err) {
+        debugLog(`could not keep the photo for retry: ${err instanceof Error ? err.message : String(err)}`)
+      }
+      try {
+        const result = await processPhoto(s, photo, (update) => {
+          setPhase((p) => (p.name === 'processing' ? { ...p, stages: { ...p.stages, [update.stage]: update } } : p))
+        })
+        await clearPendingPhoto()
+        setPhase({ name: 'review', photo, result, saving: false })
+      } catch (err) {
+        debugLog(`pipeline failed: ${err instanceof Error ? err.message : String(err)}`)
+        setPhase({ name: 'processing', photo, stages: {}, error: err instanceof Error ? err.message : String(err) })
+      }
+    },
+    [view],
+  )
 
   const onCaptured = useCallback(
     async (blob: Blob) => {
@@ -117,7 +154,24 @@ export function BaseModelFlow() {
 
   const retake = () => {
     if (phase.name === 'processing' || phase.name === 'review') phase.photo.close()
+    void clearPendingPhoto()
     setPhase({ name: 'capture' })
+  }
+
+  const leaveRecovery = () => {
+    clearRecovery()
+    void updateMlSettings({ pendingNotice: undefined })
+  }
+
+  const retryAfterCrash = async (blob: Blob) => {
+    leaveRecovery()
+    try {
+      await run((await loadImageFile(blob, MAX_SIDE)).bitmap)
+    } catch {
+      void clearPendingPhoto()
+      setPhotoError('That photo could not be opened. Take a new one.')
+      setPhase({ name: 'capture' })
+    }
   }
 
   const confirm = async (mask: Uint8Array, feather: number) => {
@@ -156,6 +210,29 @@ export function BaseModelFlow() {
   }
 
   if (phase.name === 'loading' || !view) return null
+
+  if (phase.name === 'recovery') {
+    const { photo } = phase
+    return (
+      <RecoveryScreen
+        recovery={phase.recovery}
+        canRetry={photo !== null}
+        onRetry={() => {
+          if (photo) void retryAfterCrash(photo)
+        }}
+        onNewPhoto={() => {
+          leaveRecovery()
+          void clearPendingPhoto()
+          setPhase({ name: 'capture' })
+        }}
+        onClose={() => {
+          leaveRecovery()
+          void clearPendingPhoto()
+          exit()
+        }}
+      />
+    )
+  }
 
   if (phase.name === 'tips') {
     const resuming = phase.then === 'resume'

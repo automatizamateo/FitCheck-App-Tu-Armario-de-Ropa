@@ -3,8 +3,8 @@ import type { StageId, StageUpdate } from '../baseModel/processPhoto'
 
 const LABELS: Record<StageId, string> = {
   segment: 'Removing background',
-  refine: 'Refining edges',
   pose: 'Detecting pose',
+  refine: 'Refining edges',
 }
 
 export type StageMap = Partial<Record<StageId, StageUpdate>>

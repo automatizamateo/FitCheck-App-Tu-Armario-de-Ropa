@@ -24,7 +24,7 @@ export async function estimateDownloadMB(config: SegmentationConfig, refine: boo
   if (!has(config.modelId, onnxFileName(dtype))) {
     mb += SEGMENTATION_MODELS.find((m) => m.id === config.modelId)?.sizesMB[dtype] ?? 30
   }
-  if (refine && !has(SLIMSAM.id)) mb += SLIMSAM.sizesMB[dtype]
+  if (refine && !has(SLIMSAM.id)) mb += SLIMSAM.sizesMB.q8 // always WASM q8
   if (!has('pose_landmarker')) mb += POSE_MODEL.sizeMB
   if (!has('vision_wasm')) mb += RUNTIME_SIZES_MB.mediapipe
   return mb

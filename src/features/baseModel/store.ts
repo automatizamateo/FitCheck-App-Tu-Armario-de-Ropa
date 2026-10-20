@@ -1,6 +1,6 @@
 import { useLiveQuery } from 'dexie-react-hooks'
 import { db } from '../../db/db'
-import { VIEWS, type BaseModel, type BaseModelDraft, type BaseModelView, type View } from '../../domain/types'
+import { VIEWS, type BaseModel, type BaseModelDraft, type BaseModelView, type PendingPhoto, type View } from '../../domain/types'
 
 export function useBaseModel(): BaseModel | null | undefined {
   return useLiveQuery(async () => (await db.baseModel.get('base')) ?? null)
@@ -52,4 +52,17 @@ export async function replaceBaseModelView(view: View, data: BaseModelView): Pro
 
 export async function discardDraft(): Promise<void> {
   await db.baseModelDraft.delete('draft')
+}
+
+/** Keeps the photo about to be processed until processing finishes, for Retry after a crash. */
+export async function savePendingPhoto(view: View, image: Blob): Promise<void> {
+  await db.pendingPhoto.put({ id: 'pending', view, image, savedAt: Date.now() })
+}
+
+export async function getPendingPhoto(): Promise<PendingPhoto | undefined> {
+  return db.pendingPhoto.get('pending')
+}
+
+export async function clearPendingPhoto(): Promise<void> {
+  await db.pendingPhoto.delete('pending')
 }

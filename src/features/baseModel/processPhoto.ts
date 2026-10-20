@@ -1,12 +1,23 @@
 import type { MlSettings, PoseLandmarks } from '../../domain/types'
 import { updateMlSettings } from '../../db/settings'
+import { debugLog } from '../../lib/debugLog'
+import { EDGE_WORK_SIDE, smoothMaskEdges, type Guide } from '../../lib/mask/edges'
 import { blendBoundary, cleanupMask, iou, threshold } from '../../lib/mask/ops'
+import { resizeMask } from '../../lib/mask/resample'
+import { isIOS } from '../../lib/platform'
+import { TimeoutError, withTimeout } from '../../lib/timeout'
 import { guardMl } from '../../ml/crashRecovery'
-import { REFINE_AUTO_LIMIT_MS, shouldRefine } from '../../ml/mlConfig'
+import {
+  REFINE_AUTO_LIMIT_MS,
+  REFINE_LOAD_TIMEOUT_MS,
+  REFINE_MAX_SIDE,
+  REFINE_TIMEOUT_MS,
+  shouldRefine,
+} from '../../ml/mlConfig'
 import type { LoadInfo } from '../../ml/providers'
-import type { MlSession } from '../../ml/session'
+import type { PipelineSession } from '../../ml/session'
 
-export type StageId = 'segment' | 'refine' | 'pose'
+export type StageId = 'segment' | 'pose' | 'refine'
 
 export interface StageUpdate {
   stage: StageId
@@ -24,83 +35,111 @@ export interface ProcessedPhoto {
   notes: string[] // things the user should know (skipped steps, slow refinement, no pose found)
 }
 
+/** Browser-dependent helpers, replaceable in tests. */
+export interface PipelineDeps {
+  /** A copy of the photo (each worker consumes its own), optionally downscaled to maxSide. */
+  copy(photo: ImageBitmap, maxSide?: number): Promise<ImageBitmap>
+  /** The photo's luminance (0–1) at a long side of at most maxSide. */
+  luminance(photo: ImageBitmap, maxSide: number): Guide
+  ios: boolean
+  refineTimeoutMs: number
+}
+
+export const browserDeps: PipelineDeps = {
+  copy: (photo, maxSide) => {
+    const scale = maxSide ? Math.min(1, maxSide / Math.max(photo.width, photo.height)) : 1
+    if (scale === 1) return createImageBitmap(photo)
+    return createImageBitmap(photo, {
+      resizeWidth: Math.round(photo.width * scale),
+      resizeHeight: Math.round(photo.height * scale),
+      resizeQuality: 'medium',
+    })
+  },
+  luminance: (photo, maxSide) => {
+    const scale = Math.min(1, maxSide / Math.max(photo.width, photo.height))
+    const width = Math.max(1, Math.round(photo.width * scale))
+    const height = Math.max(1, Math.round(photo.height * scale))
+    const ctx = new OffscreenCanvas(width, height).getContext('2d', { willReadFrequently: true })
+    if (!ctx) throw new Error('Canvas unavailable')
+    ctx.drawImage(photo, 0, 0, width, height)
+    const rgba = ctx.getImageData(0, 0, width, height).data
+    const data = new Float32Array(width * height)
+    for (let i = 0; i < data.length; i++) {
+      data[i] = (0.299 * (rgba[i * 4] ?? 0) + 0.587 * (rgba[i * 4 + 1] ?? 0) + 0.114 * (rgba[i * 4 + 2] ?? 0)) / 255
+    }
+    return { data, width, height }
+  },
+  ios: isIOS(),
+  refineTimeoutMs: REFINE_TIMEOUT_MS,
+}
+
 /** Below this overlap the refiner probably latched onto the wrong thing, so its result is ignored. */
 const MIN_REFINE_IOU = 0.6
 
 /**
- * Background removal + optional edge refinement + pose for one photo. Runs one model at a time.
- * `photo` is not consumed; each stage gets its own copy.
+ * Background removal → cheap edge cleanup → pose → optional SlimSAM refinement, one model at a time.
+ * Pose runs before refinement, and a failed or timed-out refinement only costs the refinement: the
+ * SegFormer mask is kept. `photo` is not consumed.
  */
 export async function processPhoto(
-  session: MlSession,
+  session: PipelineSession,
   photo: ImageBitmap,
   onStage: (update: StageUpdate) => void,
+  deps: PipelineDeps = browserDeps,
 ): Promise<ProcessedPhoto> {
   const ml = session.settings
   const { width, height } = photo
   const timings: ProcessedPhoto['timings'] = {}
   const notes: string[] = []
+  const refine = shouldRefine(ml, deps.ios)
+  debugLog('pipeline start', {
+    photo: `${width}×${height}`,
+    model: ml.model,
+    device: ml.device,
+    dtype: ml.dtype,
+    refine,
+    webgpuBroken: ml.webgpuBroken ?? false,
+  })
 
   // 1. Person mask
   const seg = session.segmentation()
-  const segInfo = await seg.load((loaded, total) => {
-    onStage({ stage: 'segment', status: 'downloading', loaded, total })
-  })
+  const segInfo = await guardMl({ stage: 'segment', step: 'load', modelId: seg.modelId }, () =>
+    seg.load((loaded, total) => {
+      onStage({ stage: 'segment', status: 'downloading', loaded, total })
+    }),
+  )
   await rememberBackend(ml, segInfo)
   onStage({ stage: 'segment', status: 'running' })
-  const segResult = await guardMl({ stage: 'segment', modelId: seg.modelId, device: segInfo.device }, async () =>
-    seg.segmentGroups(await createImageBitmap(photo), [[...seg.personClasses]]),
+  const segResult = await guardMl({ stage: 'segment', step: 'run', modelId: seg.modelId, device: segInfo.device }, async () =>
+    seg.segmentGroups(await deps.copy(photo), [[...seg.personClasses]]),
   )
   timings.segment = segResult.ms
   const prob = segResult.masks[0]
   if (!prob) throw new Error('Segmentation returned no mask')
   let mask = cleanupMask(threshold(prob), width, height)
+
+  // 1b. Cheap edge cleanup (no second model). Any failure keeps the plain SegFormer mask.
+  try {
+    const coarse = mask
+    mask = await guardMl({ stage: 'segment', step: 'post' }, () =>
+      Promise.resolve(smoothMaskEdges(coarse, width, height, deps.luminance(photo, EDGE_WORK_SIDE))),
+    )
+  } catch {
+    /* logged by guardMl */
+  }
   onStage({ stage: 'segment', status: 'done' })
 
-  // 2. Optional edge refinement
-  if (shouldRefine(ml)) {
-    try {
-      const refiner = session.edgeRefiner()
-      const info = await refiner.load((loaded, total) => {
-        onStage({ stage: 'refine', status: 'downloading', loaded, total })
-      })
-      onStage({ stage: 'refine', status: 'running' })
-      const refined = await guardMl({ stage: 'refine', modelId: info.modelId, device: info.device }, async () =>
-        refiner.refine(await createImageBitmap(photo), mask, width, height),
-      )
-      timings.refine = refined.ms
-      if (iou(refined.mask, mask) >= MIN_REFINE_IOU) {
-        const band = Math.max(4, Math.round(0.012 * Math.max(width, height)))
-        mask = cleanupMask(blendBoundary(mask, refined.mask, width, height, band), width, height)
-      } else {
-        notes.push('Edge refinement didn’t match this photo well, so it was skipped.')
-      }
-      if (ml.refineEdges === 'auto') {
-        await updateMlSettings({ refineBenchmarkMs: Math.round(refined.ms) })
-        if (refined.ms > REFINE_AUTO_LIMIT_MS) {
-          notes.push(
-            `Refining edges took ${(refined.ms / 1000).toFixed(1)} s on this device, so it will be skipped from now on. You can turn it back on in Settings → Advanced.`,
-          )
-        }
-      }
-      onStage({ stage: 'refine', status: 'done' })
-    } catch (err) {
-      notes.push(`Edge refinement failed (${err instanceof Error ? err.message : String(err)}). Using the basic cut-out.`)
-      onStage({ stage: 'refine', status: 'failed' })
-    }
-  } else {
-    onStage({ stage: 'refine', status: 'skipped' })
-  }
-
-  // 3. Pose
+  // 2. Pose, before any refinement, so a refinement problem can never cost us the pose.
   let landmarks: PoseLandmarks = {}
   try {
     const pose = session.poseDetector()
-    await pose.load((loaded, total) => {
-      onStage({ stage: 'pose', status: 'downloading', loaded, total })
-    })
+    await guardMl({ stage: 'pose', step: 'load' }, () =>
+      pose.load((loaded, total) => {
+        onStage({ stage: 'pose', status: 'downloading', loaded, total })
+      }),
+    )
     onStage({ stage: 'pose', status: 'running' })
-    const res = await guardMl({ stage: 'pose' }, async () => pose.detect(await createImageBitmap(photo)))
+    const res = await guardMl({ stage: 'pose', step: 'run' }, async () => pose.detect(await deps.copy(photo)))
     landmarks = res.landmarks
     timings.pose = res.ms
     if (!landmarks.leftShoulder || !landmarks.rightHip) {
@@ -108,15 +147,102 @@ export async function processPhoto(
     }
     onStage({ stage: 'pose', status: 'done' })
   } catch (err) {
-    notes.push(`Pose detection failed (${err instanceof Error ? err.message : String(err)}).`)
+    notes.push(`Pose detection failed (${errorText(err)}).`)
     onStage({ stage: 'pose', status: 'failed' })
   }
 
+  // 3. Optional SlimSAM refinement
+  if (refine) {
+    const refined = await refineWithSam(session, photo, mask, onStage, deps, notes)
+    if (refined) {
+      mask = refined.mask
+      timings.refine = refined.ms
+    }
+  } else {
+    onStage({ stage: 'refine', status: 'skipped' })
+  }
+
+  debugLog('pipeline done', { notes: notes.length })
   return { mask, width, height, landmarks, timings, notes }
+}
+
+/**
+ * Frees the other models, runs SlimSAM on a downscaled copy under a hard timeout, and always frees
+ * SlimSAM afterwards. Returns null (and adds a note) on any failure, so the caller keeps its mask.
+ */
+async function refineWithSam(
+  session: PipelineSession,
+  photo: ImageBitmap,
+  mask: Uint8Array,
+  onStage: (update: StageUpdate) => void,
+  deps: PipelineDeps,
+  notes: string[],
+): Promise<{ mask: Uint8Array; ms: number } | null> {
+  const ml = session.settings
+  const { width, height } = photo
+  session.releaseForRefine()
+  try {
+    const refiner = session.edgeRefiner()
+    const abort = () => {
+      session.releaseRefiner()
+    }
+    const info = await guardMl({ stage: 'refine', step: 'load' }, () =>
+      withTimeout(
+        refiner.load((loaded, total) => {
+          onStage({ stage: 'refine', status: 'downloading', loaded, total })
+        }),
+        REFINE_LOAD_TIMEOUT_MS,
+        'Loading the edge refiner',
+        abort,
+      ),
+    )
+    onStage({ stage: 'refine', status: 'running' })
+    const small = await deps.copy(photo, REFINE_MAX_SIDE)
+    const sw = small.width
+    const sh = small.height
+    const smallMask = resizeMask(mask, width, height, sw, sh)
+    const result = await guardMl({ stage: 'refine', step: 'run', modelId: info.modelId, device: info.device }, () =>
+      withTimeout(refiner.refine(small, smallMask, sw, sh), deps.refineTimeoutMs, 'Refining edges', abort),
+    )
+    const fine = resizeMask(result.mask, sw, sh, width, height)
+
+    if (ml.refineEdges === 'auto') {
+      await updateMlSettings({ refineBenchmarkMs: Math.round(result.ms) })
+      if (result.ms > REFINE_AUTO_LIMIT_MS) {
+        notes.push(
+          `Refining edges took ${(result.ms / 1000).toFixed(1)} s on this device, so it will be skipped from now on. You can turn it back on in Settings → Advanced.`,
+        )
+      }
+    }
+    if (iou(fine, mask) < MIN_REFINE_IOU) {
+      notes.push('Edge refinement didn’t match this photo well, so it was skipped.')
+      onStage({ stage: 'refine', status: 'done' })
+      return null
+    }
+    const band = Math.max(4, Math.round(0.012 * Math.max(width, height)))
+    onStage({ stage: 'refine', status: 'done' })
+    return { mask: cleanupMask(blendBoundary(mask, fine, width, height, band), width, height), ms: result.ms }
+  } catch (err) {
+    if (err instanceof TimeoutError && ml.refineEdges === 'auto') {
+      await updateMlSettings({ refineBenchmarkMs: deps.refineTimeoutMs }).catch(() => undefined)
+    }
+    notes.push(`Edge refinement didn’t finish (${errorText(err)}), so the basic cut-out is used.`)
+    onStage({ stage: 'refine', status: 'failed' })
+    return null
+  } finally {
+    session.releaseRefiner()
+  }
 }
 
 async function rememberBackend(ml: MlSettings, info: LoadInfo) {
   const changes: Partial<MlSettings> = { lastUsed: { modelId: info.modelId, device: info.device, dtype: info.dtype } }
-  if (info.fallbackReason && ml.device === 'auto' && info.device === 'wasm') changes.webgpuBroken = true
+  if (info.fallbackReason && ml.device === 'auto' && info.device === 'wasm') {
+    changes.webgpuBroken = true
+    debugLog('WebGPU failed, using WASM', { reason: info.fallbackReason })
+  }
   await updateMlSettings(changes)
+}
+
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
 }

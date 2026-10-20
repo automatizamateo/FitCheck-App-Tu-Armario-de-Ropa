@@ -56,3 +56,13 @@ export function resizeBilinearToUint8(
   }
   return out
 }
+
+/** Resizes a 0/1 mask (bilinear, then threshold at 50 %), so upscaled edges come out smooth. */
+export function resizeMask(mask: Uint8Array, sw: number, sh: number, dw: number, dh: number): Uint8Array {
+  if (sw === dw && sh === dh) return mask.slice()
+  const src = new Float32Array(mask.length)
+  for (let i = 0; i < mask.length; i++) src[i] = mask[i] ? 1 : 0
+  const resized = resizeBilinearToUint8(src, sw, sh, dw, dh)
+  for (let i = 0; i < resized.length; i++) resized[i] = (resized[i] ?? 0) >= 128 ? 1 : 0
+  return resized
+}

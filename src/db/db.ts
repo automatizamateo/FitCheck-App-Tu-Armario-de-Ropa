@@ -1,6 +1,7 @@
 import { Dexie, type EntityTable } from 'dexie'
 import { DEFAULT_STYLES } from '../domain/attributes'
-import type { BaseModel, BaseModelDraft, Item, MlSettings, Outfit, Settings, Style, WearLogEntry } from '../domain/types'
+import type { BaseModel, BaseModelDraft, Item, MlSettings, Outfit, PendingPhoto, Settings, Style, WearLogEntry } from '../domain/types'
+import { LIGHT_SEGMENTATION_MODEL } from '../ml/models'
 
 export const DEFAULT_ML_SETTINGS: MlSettings = {
   model: 'auto',
@@ -26,6 +27,7 @@ export function withSettingsDefaults(stored: Partial<Settings> | undefined): Set
 export class FitCheckDB extends Dexie {
   baseModel!: EntityTable<BaseModel, 'id'>
   baseModelDraft!: EntityTable<BaseModelDraft, 'id'>
+  pendingPhoto!: EntityTable<PendingPhoto, 'id'>
   items!: EntityTable<Item, 'id'>
   outfits!: EntityTable<Outfit, 'id'>
   wearLog!: EntityTable<WearLogEntry, 'id'>
@@ -55,6 +57,22 @@ export class FitCheckDB extends Dexie {
           .toCollection()
           .modify((s) => {
             Object.assign(s, withSettingsDefaults(s))
+          }),
+      )
+
+    // v3: pending photo for crash recovery; Phase 2 crash flags become plain settings values.
+    this.version(3)
+      .stores({ pendingPhoto: 'id' })
+      .upgrade((tx) =>
+        tx
+          .table<Settings, string>('settings')
+          .toCollection()
+          .modify((s) => {
+            const ml = s.ml as MlSettings & { refineCrashed?: boolean; crashFallback?: boolean }
+            if (ml.crashFallback && ml.model === 'auto') ml.model = LIGHT_SEGMENTATION_MODEL
+            if (ml.refineCrashed && ml.refineEdges === 'auto') ml.refineEdges = 'off'
+            delete ml.crashFallback
+            delete ml.refineCrashed
           }),
       )
 

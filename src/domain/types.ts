@@ -66,6 +66,14 @@ export interface BaseModelDraft {
   startedAt: number
 }
 
+/** The photo being processed, kept so "Retry" works after iOS kills the page mid-processing. */
+export interface PendingPhoto {
+  id: 'pending'
+  view: View
+  image: Blob // JPEG of the downscaled photo
+  savedAt: number
+}
+
 export interface BaseModel {
   id: 'base'
   views: Record<View, BaseModelView>
@@ -134,11 +142,9 @@ export interface MlSettings {
   model: string // 'auto' or a segmentation model id
   device: MlDevice
   dtype: 'auto' | MlDtype
-  refineEdges: 'auto' | 'on' | 'off'
+  refineEdges: 'auto' | 'on' | 'off' // auto = off on iOS; elsewhere on until a run is too slow
   refineBenchmarkMs?: number // last edge-refinement time on this device
-  refineCrashed?: boolean // iOS killed the page while refining
   webgpuBroken?: boolean // WebGPU failed to load or run inside the worker
-  crashFallback?: boolean // iOS killed the page with the default model → auto uses the light one
   lastUsed?: { modelId: string; device: 'webgpu' | 'wasm'; dtype: MlDtype }
   pendingNotice?: string // shown once, then cleared
 }

@@ -64,7 +64,7 @@ Before you start: update the installed app (open it twice, or delete it and re-a
 - [ ] The camera opens on the **rear** camera inside the installed app, and iOS asks for permission. "Switch camera" toggles front/rear, and the front preview is mirrored.
 - [ ] A dashed body outline shows for the first photo of each view.
 - [ ] The self-timer cycles Off / 3s / 5s / 10s and stays as you set it. The countdown shows big numbers, beeps each second (if the ringer is on) and buzzes on iOS 18+. Tapping the shutter during the countdown cancels it.
-- [ ] Processing shows three steps (Removing background, Refining edges, Detecting pose) with download progress in MB the first time.
+- [ ] Processing shows three steps in this order: Removing background, Detecting pose, Refining edges (shown as off on iPhone by default). The first time, it shows download progress in MB.
 - [ ] **Write down:** how long the first photo took, including downloads, and how long the 2nd and 3rd took. Then check Settings → Advanced → AI processing → "Last used" (model · gpu/wasm · precision) and the "Refine edges" time.
 - [ ] Review: the cut-out looks right (shoulders, arms, between the legs, feet). Use "Pose" to check the skeleton matches your body.
 - [ ] Brush: Add / Erase, size slider, **one finger paints, two fingers pinch-zoom and pan without painting**, double-tap resets the view, and Undo / Redo work for 20+ steps. The page never scrolls, bounces, zooms or shows the callout or text selection.
@@ -76,7 +76,9 @@ Before you start: update the installed app (open it twice, or delete it and re-a
 - [ ] **Resume:** after confirming the front view, force-quit the app. Reopen it and choose Create base model: it continues at "1 of 3 done".
 - [ ] **Retake:** Settings → Base model → Retake side shows the re-alignment warning. The camera shows your previous side cut-out as a faint overlay. After confirming, only that thumbnail changes.
 - [ ] **Offline:** after one full run, turn on Airplane Mode, force-quit, reopen, retake one view. Everything works with no downloads.
-- [ ] **Memory:** if the app reloads by itself while processing, the next launch shows a yellow notice once explaining what it switched to (refine off → lighter model → CPU). Report which notice you saw.
+- [ ] **Memory:** if the app reloads by itself while processing, it opens a **recovery screen** and does not start processing by itself. The screen explains what it switched to (refine off → lighter model → CPU). "Retry with the same photo" processes the same photo again with the lighter setup. Report what the screen said, and copy Settings → Advanced → Debug log.
+- [ ] **Refine edges opt-in (iPhone):** in Settings → Advanced, Refine edges says "Auto: off on iPhone and iPad". Choosing "On (may crash)" shows a warning. With it on, processing goes Removing background ✓ → Detecting pose ✓ → Refining edges. If refining fails or takes over 15 s, the review screen still opens with the basic cut-out and a note. If the app gets killed instead, the recovery screen appears and Refine edges is back to Off.
+- [ ] **Debug log:** Settings → Advanced → Debug log lists `launch`, `pipeline start`, then `▶`/`✓` lines with ms for each step. Copy works.
 - [ ] Settings → Advanced: switch Background model to B0, or Processor to CPU, and retake a view. It still works, and "Last used" reflects the choice. "Reset to automatic" restores Auto.
 
 ### Report back

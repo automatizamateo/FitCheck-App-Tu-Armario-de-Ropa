@@ -4,6 +4,8 @@ import { Disclosure, Row } from '../../components/SettingsUI'
 import { DEFAULT_ML_SETTINGS } from '../../db/db'
 import { updateMlSettings, useSettings } from '../../db/settings'
 import type { MlSettings } from '../../domain/types'
+import { clearDebugLog, formatDebugLog, readDebugLog } from '../../lib/debugLog'
+import { isIOS } from '../../lib/platform'
 import { deleteDownloadedModels, downloadedModelsMB } from '../../ml/downloads'
 import { REFINE_AUTO_LIMIT_MS, resolveSegmentationConfig, shouldRefine } from '../../ml/mlConfig'
 import { SEGMENTATION_MODELS } from '../../ml/models'
@@ -32,14 +34,19 @@ export function AdvancedSection() {
   const resolved = resolveSegmentationConfig(ml)
   const set = (changes: Partial<MlSettings>) => void updateMlSettings(changes)
 
-  const refineStatus =
-    ml.refineEdges !== 'auto'
-      ? null
-      : ml.refineCrashed
-        ? 'off: ran out of memory'
-        : ml.refineBenchmarkMs !== undefined
-          ? `${shouldRefine(ml) ? 'on' : 'off'}: last run ${(ml.refineBenchmarkMs / 1000).toFixed(1)} s (limit ${REFINE_AUTO_LIMIT_MS / 1000} s)`
-          : 'on until measured'
+  const ios = isIOS()
+  const refineHint =
+    ml.refineEdges === 'on'
+      ? ios
+        ? '⚠ May crash on some devices'
+        : 'Better quality, slower'
+      : ml.refineEdges === 'off'
+        ? 'Better quality, slower'
+        : ios
+          ? 'Auto: off on iPhone and iPad'
+          : ml.refineBenchmarkMs !== undefined
+            ? `Auto: ${shouldRefine(ml, ios) ? 'on' : 'off'}, last run ${(ml.refineBenchmarkMs / 1000).toFixed(1)} s (limit ${REFINE_AUTO_LIMIT_MS / 1000} s)`
+            : 'Auto: on until measured'
 
   return (
     <section>
@@ -83,7 +90,7 @@ export function AdvancedSection() {
                 ]}
               />
             </Row>
-            <Row label="Refine edges" hint={refineStatus ?? 'Better quality, slower'}>
+            <Row label="Refine edges" hint={refineHint}>
               <Select
                 value={ml.refineEdges}
                 onChange={(v) => {
@@ -91,11 +98,17 @@ export function AdvancedSection() {
                 }}
                 options={[
                   ['auto', 'Auto'],
-                  ['on', 'On'],
+                  ['on', ios ? 'On (may crash)' : 'On'],
                   ['off', 'Off'],
                 ]}
               />
             </Row>
+            {ios && ml.refineEdges === 'on' && (
+              <p className="bg-amber-50 px-4 py-3 text-xs leading-relaxed text-amber-950 dark:bg-amber-950 dark:text-amber-50">
+                Refining edges runs a second AI model and may crash on some devices. If FitCheck closes while processing, it
+                turns this off again by itself.
+              </p>
+            )}
             {ml.lastUsed && (
               <Row label="Last used">
                 <span className="text-muted text-right text-xs">
@@ -128,7 +141,7 @@ export function AdvancedSection() {
                 type="button"
                 className="text-accent h-11 text-sm font-medium"
                 onClick={() => {
-                  set({ ...DEFAULT_ML_SETTINGS, refineBenchmarkMs: undefined, refineCrashed: undefined, webgpuBroken: undefined, crashFallback: undefined, pendingNotice: undefined })
+                  set({ ...DEFAULT_ML_SETTINGS, refineBenchmarkMs: undefined, webgpuBroken: undefined, pendingNotice: undefined })
                 }}
               >
                 Reset to automatic
@@ -145,8 +158,56 @@ export function AdvancedSection() {
             </div>
           </div>
         </Disclosure>
+        <Disclosure label="Debug log">
+          <DebugLogPanel />
+        </Disclosure>
       </div>
     </section>
+  )
+}
+
+/** The persistent pipeline log, newest last. Survives iOS killing the page, so it shows which step died. */
+function DebugLogPanel() {
+  const [text, setText] = useState(() => formatDebugLog(readDebugLog()))
+  const [copied, setCopied] = useState(false)
+  return (
+    <div className="space-y-2">
+      <pre className="bg-canvas border-line max-h-80 overflow-auto rounded-xl border p-2 font-mono text-[10px] leading-snug whitespace-pre-wrap">
+        {text || 'Empty.'}
+      </pre>
+      <div className="flex gap-4">
+        <button
+          type="button"
+          className="text-accent h-11 text-sm font-medium"
+          onClick={() => {
+            setText(formatDebugLog(readDebugLog()))
+          }}
+        >
+          Refresh
+        </button>
+        <button
+          type="button"
+          className="text-accent h-11 text-sm font-medium"
+          onClick={() => {
+            void navigator.clipboard.writeText(text).then(() => {
+              setCopied(true)
+            })
+          }}
+        >
+          {copied ? 'Copied' : 'Copy'}
+        </button>
+        <button
+          type="button"
+          className="h-11 text-sm font-medium text-red-600"
+          onClick={() => {
+            clearDebugLog()
+            setText('')
+          }}
+        >
+          Clear
+        </button>
+      </div>
+    </div>
   )
 }
 

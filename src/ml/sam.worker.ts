@@ -45,7 +45,16 @@ async function predict(
     original_sizes: [number, number][]
     reshaped_input_sizes: [number, number][]
   }
-  const outputs = (await m(inputs)) as unknown as SamOutputs
+  // Computed here rather than inside m(): SamModel.forward never disposes the embeddings it makes.
+  const embeddings = (await m.get_image_embeddings(inputs as unknown as { pixel_values: Tensor })) as Record<string, unknown>
+  disposeTensors({ pixel_values: inputs.pixel_values })
+  let outputs: SamOutputs
+  try {
+    const result: unknown = await m({ ...inputs, ...embeddings })
+    outputs = result as SamOutputs
+  } finally {
+    disposeTensors(embeddings)
+  }
   const postProcess = (p as unknown as { post_process_masks: (...a: unknown[]) => Promise<Tensor[]> }).post_process_masks
   const [masks] = await postProcess.call(p, outputs.pred_masks, inputs.original_sizes, inputs.reshaped_input_sizes)
   disposeTensors(inputs)

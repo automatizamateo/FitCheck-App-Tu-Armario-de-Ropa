@@ -100,24 +100,24 @@ export function createSegmentationProvider(config: SegmentationConfig): Segmenta
   return entry.create(config)
 }
 
-/** SlimSAM, prompted with points sampled from the rough mask. */
+/**
+ * SlimSAM, prompted with points sampled from the rough mask, in its own worker. Always WASM q8: it is
+ * the smallest and most predictable on memory, and a WebGPU SAM is what got iPhones killed. dispose()
+ * terminates the worker, which frees everything it allocated.
+ */
 export class SlimSamRefiner implements EdgeRefiner {
   private readonly rpc = new WorkerRpc<SamResponse>(
     () => new Worker(new URL('./sam.worker.ts', import.meta.url), { type: 'module' }),
   )
-  private readonly loadOnce: () => Promise<LoadInfo>
-
-  constructor(config: Pick<SegmentationConfig, 'device' | 'dtype'>) {
-    this.loadOnce = once(async () => {
-      const res = await this.rpc.request<Extract<SamResponse, { type: 'loaded' }>>({
-        type: 'load',
-        modelId: SLIMSAM.id,
-        device: config.device,
-        dtype: config.dtype,
-      })
-      return { modelId: SLIMSAM.id, device: res.device, dtype: res.dtype, ms: res.ms, fallbackReason: res.fallbackReason }
+  private readonly loadOnce = once(async (): Promise<LoadInfo> => {
+    const res = await this.rpc.request<Extract<SamResponse, { type: 'loaded' }>>({
+      type: 'load',
+      modelId: SLIMSAM.id,
+      device: 'wasm',
+      dtype: 'q8',
     })
-  }
+    return { modelId: SLIMSAM.id, device: res.device, dtype: res.dtype, ms: res.ms, fallbackReason: res.fallbackReason }
+  })
 
   load(onProgress?: ProgressFn) {
     this.rpc.onProgress = onProgress ?? null

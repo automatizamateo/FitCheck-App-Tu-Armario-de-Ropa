@@ -1,6 +1,8 @@
+import { Dexie } from 'dexie'
 import { afterEach, describe, expect, it } from 'vitest'
 import { DEFAULT_STYLES } from '../domain/attributes'
-import { FitCheckDB } from './db'
+import { LIGHT_SEGMENTATION_MODEL } from '../ml/models'
+import { DEFAULT_SETTINGS, FitCheckDB } from './db'
 
 let db: FitCheckDB | undefined
 
@@ -39,5 +41,21 @@ describe('FitCheckDB', () => {
     })
     expect(await db.items.where('styleIds').equals('builtin-sporty').count()).toBe(1)
     expect(await db.items.where('category').equals('Pants').count()).toBe(0)
+  })
+
+  it('v3 turns the old crash flags into plain settings', async () => {
+    const old = new Dexie('test-v3')
+    old.version(2).stores({ baseModel: 'id', baseModelDraft: 'id', settings: 'id' })
+    await old.table('settings').put({
+      ...DEFAULT_SETTINGS,
+      ml: { ...DEFAULT_SETTINGS.ml, crashFallback: true, refineCrashed: true },
+    })
+    old.close()
+
+    db = new FitCheckDB('test-v3')
+    const ml = (await db.settings.get('settings'))?.ml
+    expect(ml).toMatchObject({ model: LIGHT_SEGMENTATION_MODEL, refineEdges: 'off' })
+    expect(ml).not.toHaveProperty('crashFallback')
+    expect(ml).not.toHaveProperty('refineCrashed')
   })
 })
