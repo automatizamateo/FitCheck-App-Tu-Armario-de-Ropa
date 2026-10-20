@@ -7,7 +7,8 @@ export function OnboardingGate() {
   const { pathname } = useLocation()
   if (!settings) return null
   const onWelcome = pathname === '/welcome'
-  if (!settings.onboardingDone && !onWelcome) return <Navigate to="/welcome" replace />
+  const allowedDuringOnboarding = onWelcome || pathname === '/base-model'
+  if (!settings.onboardingDone && !allowedDuringOnboarding) return <Navigate to="/welcome" replace />
   if (settings.onboardingDone && onWelcome) return <Navigate to="/wardrobe" replace />
   return <Outlet />
 }

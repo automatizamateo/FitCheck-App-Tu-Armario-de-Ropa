@@ -8,3 +8,4 @@ coverage
 !.vscode/extensions.json
 .idea
 public/ort
+public/mediapipe

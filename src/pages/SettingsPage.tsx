@@ -1,10 +1,13 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { useNavigate } from 'react-router'
 import { BulletList, PhotoTipsList } from '../components/InfoContent'
 import { PRIVACY_POINTS } from '../content/info'
 import { InstallInstructions } from '../components/InstallInstructions'
 import { PageHeader } from '../components/PageHeader'
+import { Disclosure, Row, Section, Toggle } from '../components/SettingsUI'
+import { AdvancedSection } from './settings/AdvancedSection'
+import { BaseModelSection } from './settings/BaseModelSection'
 import { APP_CONFIG } from '../config/app'
 import { db } from '../db/db'
 import { updateSettings, useSettings } from '../db/settings'
@@ -31,6 +34,8 @@ export function SettingsPage() {
     <>
       <PageHeader title="Settings" />
       <div className="px-safe space-y-6 pb-6">
+        <BaseModelSection />
+
         <Section title="Wardrobe">
           <Row label="Unused after">
             <select
@@ -53,7 +58,7 @@ export function SettingsPage() {
             />
           </Row>
           <Row label="Styles">
-            <span className="text-muted text-right text-sm">{styles.map((s) => s.name).join(', ')}</span>
+            <span className="text-muted block truncate text-right text-sm">{styles.map((s) => s.name).join(', ')}</span>
           </Row>
         </Section>
 
@@ -90,6 +95,8 @@ export function SettingsPage() {
           </Disclosure>
         </Section>
 
+        <AdvancedSection />
+
         <VersionFooter />
       </div>
     </>
@@ -110,57 +117,5 @@ function VersionFooter() {
     <p className="text-muted text-center text-xs" onClick={onTap}>
       {APP_CONFIG.name} {__APP_VERSION__} · Works offline · No data leaves this device
     </p>
-  )
-}
-
-function Section({ title, children }: { title: string; children: ReactNode }) {
-  return (
-    <section>
-      <h2 className="text-muted mb-2 px-1 text-xs font-semibold tracking-wider uppercase">{title}</h2>
-      <div className="bg-surface border-line divide-line divide-y overflow-hidden rounded-2xl border">{children}</div>
-    </section>
-  )
-}
-
-function Row({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
-  return (
-    <div className="flex min-h-13 items-center justify-between gap-4 px-4 py-2.5">
-      <div className="min-w-0">
-        <p className="text-[15px]">{label}</p>
-        {hint && <p className="text-muted text-xs">{hint}</p>}
-      </div>
-      <div className="shrink-0">{children}</div>
-    </div>
-  )
-}
-
-function Disclosure({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <details className="group">
-      <summary className="flex min-h-13 cursor-pointer list-none items-center justify-between px-4 text-[15px] [&::-webkit-details-marker]:hidden">
-        {label}
-        <span className="text-muted transition group-open:rotate-90">›</span>
-      </summary>
-      <div className="px-4 pt-1 pb-4">{children}</div>
-    </details>
-  )
-}
-
-function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (v: boolean) => void; label: string }) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      aria-label={label}
-      onClick={() => {
-        onChange(!checked)
-      }}
-      className={`relative h-[31px] w-[51px] rounded-full transition-colors ${checked ? 'bg-accent' : 'bg-line'}`}
-    >
-      <span
-        className={`absolute top-0.5 left-0.5 size-[27px] rounded-full bg-white shadow transition-transform ${checked ? 'translate-x-5' : ''}`}
-      />
-    </button>
   )
 }

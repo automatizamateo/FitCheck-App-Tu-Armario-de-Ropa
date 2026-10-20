@@ -1,4 +1,5 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
+import { ViewportCanvas, type ViewportHandle } from '../components/ViewportCanvas'
 import { LABEL_COLORS } from '../ml/models'
 
 export type OverlayMode = 'classes' | 'cutout' | 'photo'
@@ -11,22 +12,20 @@ interface MaskCanvasProps {
   mode: OverlayMode
 }
 
+/** Lab result view: class overlay or cut-out, with pinch-zoom / pan / double-tap to fit. */
 export function MaskCanvas({ image, labels, maskWidth, maskHeight, mode }: MaskCanvasProps) {
-  const ref = useRef<HTMLCanvasElement>(null)
+  const viewport = useRef<ViewportHandle>(null)
 
-  useEffect(() => {
-    const canvas = ref.current
-    const ctx = canvas?.getContext('2d')
-    if (!canvas || !ctx) return
+  const composed = useMemo(() => {
+    const canvas = document.createElement('canvas')
     canvas.width = image.width
     canvas.height = image.height
-    ctx.clearRect(0, 0, canvas.width, canvas.height)
-
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return canvas
     if (!labels || mode === 'photo') {
       ctx.drawImage(image, 0, 0)
-      return
+      return canvas
     }
-
     const mask = new ImageData(maskWidth, maskHeight)
     for (let i = 0; i < labels.length; i++) {
       const label = labels[i] ?? 0
@@ -41,26 +40,38 @@ export function MaskCanvas({ image, labels, maskWidth, maskHeight, mode }: MaskC
         mask.data[o + 3] = label === 0 ? 0 : 255
       }
     }
-    const maskCanvas = new OffscreenCanvas(maskWidth, maskHeight)
+    const maskCanvas = document.createElement('canvas')
+    maskCanvas.width = maskWidth
+    maskCanvas.height = maskHeight
     maskCanvas.getContext('2d')?.putImageData(mask, 0, 0)
-
+    ctx.imageSmoothingQuality = 'high'
     if (mode === 'classes') {
       ctx.drawImage(image, 0, 0)
-      ctx.imageSmoothingQuality = 'high'
       ctx.drawImage(maskCanvas, 0, 0, canvas.width, canvas.height)
     } else {
-      // Cut-out: keep only the person; the checkerboard behind the canvas shows through.
       ctx.drawImage(maskCanvas, 0, 0, canvas.width, canvas.height)
       ctx.globalCompositeOperation = 'source-in'
       ctx.drawImage(image, 0, 0)
-      ctx.globalCompositeOperation = 'source-over'
     }
+    return canvas
   }, [image, labels, maskWidth, maskHeight, mode])
 
+  useEffect(() => {
+    viewport.current?.invalidate()
+  }, [composed])
+
   return (
-    <canvas
-      ref={ref}
-      className="w-full rounded-2xl bg-[repeating-conic-gradient(#d6d3d1_0%_25%,#fafaf9_0%_50%)] bg-[length:20px_20px]"
-    />
+    <div
+      className="aspect-[3/4] w-full overflow-hidden rounded-2xl bg-[repeating-conic-gradient(#d6d3d1_0%_25%,#fafaf9_0%_50%)] bg-[length:20px_20px]"
+    >
+      <ViewportCanvas
+        ref={viewport}
+        contentWidth={image.width}
+        contentHeight={image.height}
+        draw={(ctx) => {
+          ctx.drawImage(composed, 0, 0)
+        }}
+      />
+    </div>
   )
 }

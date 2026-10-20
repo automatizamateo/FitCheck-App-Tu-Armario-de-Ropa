@@ -53,3 +53,31 @@ For each combination, write down the load time, the time for the first "Segment"
 - [ ] **Offline:** with a model downloaded, turn on Airplane Mode, force-quit the app, reopen it, open the lab, then load the same model and segment. It works.
 - [ ] **Memory:** run "Run 5×" three times in a row with B2 on each device. If the app reloads by itself, a red notice appears at the top of the lab next time.
 - [ ] Check the "classes" and "cutout" views: does the person cut-out look clean? Are T-shirt, pants and shoes labelled correctly?
+
+## Phase 2 — Base model & capture
+
+Before you start: update the installed app (open it twice, or delete it and re-add it to the Home Screen). Use Wi-Fi, because the first photo downloads about 70–125 MB of AI models once. Wear tight thermals and stand against a plain wall.
+
+### Create the base model
+- [ ] Wardrobe shows a "Create your base model" card. Settings → Base model shows "Create base model".
+- [ ] The tips screen shows the photo tips and "One-time download, about N MB".
+- [ ] The camera opens on the **rear** camera inside the installed app, and iOS asks for permission. "Switch camera" toggles front/rear, and the front preview is mirrored.
+- [ ] A dashed body outline shows for the first photo of each view.
+- [ ] The self-timer cycles Off / 3s / 5s / 10s and stays as you set it. The countdown shows big numbers, beeps each second (if the ringer is on) and buzzes on iOS 18+. Tapping the shutter during the countdown cancels it.
+- [ ] Processing shows three steps (Removing background, Refining edges, Detecting pose) with download progress in MB the first time.
+- [ ] **Write down:** how long the first photo took, including downloads, and how long the 2nd and 3rd took. Then check Settings → Advanced → AI processing → "Last used" (model · gpu/wasm · precision) and the "Refine edges" time.
+- [ ] Review: the cut-out looks right (shoulders, arms, between the legs, feet). Use "Pose" to check the skeleton matches your body.
+- [ ] Brush: Add / Erase, size slider, **one finger paints, two fingers pinch-zoom and pan without painting**, double-tap resets the view, and Undo / Redo work for 20+ steps. The page never scrolls, bounces, zooms or shows the callout or text selection.
+- [ ] Preview shows the checkerboard with Sharp / Soft / Softer edges.
+- [ ] Side and back follow automatically (2 of 3, 3 of 3). Choosing a photo from Library also works.
+- [ ] Coming from onboarding, finishing takes you to Wardrobe.
+
+### Robustness
+- [ ] **Resume:** after confirming the front view, force-quit the app. Reopen it and choose Create base model: it continues at "1 of 3 done".
+- [ ] **Retake:** Settings → Base model → Retake side shows the re-alignment warning. The camera shows your previous side cut-out as a faint overlay. After confirming, only that thumbnail changes.
+- [ ] **Offline:** after one full run, turn on Airplane Mode, force-quit, reopen, retake one view. Everything works with no downloads.
+- [ ] **Memory:** if the app reloads by itself while processing, the next launch shows a yellow notice once explaining what it switched to (refine off → lighter model → CPU). Report which notice you saw.
+- [ ] Settings → Advanced: switch Background model to B0, or Processor to CPU, and retake a view. It still works, and "Last used" reflects the choice. "Reset to automatic" restores Auto.
+
+### Report back
+For each of the 3 views: total seconds, gpu/wasm, refine time, and anything wrong with the cut-out or the gestures.

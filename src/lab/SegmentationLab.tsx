@@ -114,7 +114,7 @@ export function SegmentationLab() {
       if (!photo) return
       for (let i = 0; i < times; i++) {
         const t = performance.now()
-        const res = await getClient().segment(await createImageBitmap(photo.bitmap), maskSide)
+        const res = await getClient().segment(await createImageBitmap(photo.bitmap), { labelMaxSide: maskSide })
         const total = performance.now() - t
         setResult(res)
         setRuns((r) => [...r, { n: r.length + 1, timings: res.timings, total }])
@@ -261,7 +261,7 @@ export function SegmentationLab() {
             maskHeight={result?.height ?? 0}
             mode={mode}
           />
-          {result && <Legend labels={result.labels} />}
+          {result?.labels && <Legend labels={result.labels} />}
         </Panel>
       )}
 

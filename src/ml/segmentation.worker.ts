@@ -3,102 +3,120 @@ import {
   AutoModel,
   AutoProcessor,
   RawImage,
-  env,
   interpolate_4d,
   type PreTrainedModel,
   type Processor,
-  type ProgressInfo,
   type Tensor,
 } from '@huggingface/transformers'
-import type { Dtype } from './models'
-import type { WorkerRequest, WorkerResponse } from './protocol'
+import { groupProbability, resizeBilinearToUint8 } from '../lib/mask/resample'
+import type { Outbound, WorkerRequest, WorkerResponse } from './protocol'
+import {
+  backendCandidates,
+  configureOnnxRuntime,
+  disposeTensors,
+  errorMessage,
+  hasWebGPUAdapter,
+  loadFirstWorking,
+  progressForwarder,
+  rawImageFromBitmap,
+} from './workerUtils'
 
 declare const self: DedicatedWorkerGlobalScope
 
-const webgpuAvailable = 'gpu' in navigator
-
-// Serve the ONNX Runtime WASM from our own origin instead of jsDelivr. Transformers.js then stores it in
-// Cache Storage ('transformers-cache') next to the model files, so both work offline after the first load.
-// The asyncify build is required for the WebGPU execution provider; the plain build is smaller.
-const ortVariant = webgpuAvailable ? '.asyncify' : ''
-const ortBase = new URL(`${import.meta.env.BASE_URL}ort/ort-wasm-simd-threaded${ortVariant}`, self.location.origin).href
-if (env.backends.onnx.wasm) {
-  env.backends.onnx.wasm.wasmPaths = { mjs: `${ortBase}.mjs`, wasm: `${ortBase}.wasm` }
-}
-env.allowLocalModels = false
+configureOnnxRuntime()
 
 let processor: Processor | null = null
 let model: PreTrainedModel | null = null
 
-function post(message: WorkerResponse, transfer: Transferable[] = []) {
+function post(message: Outbound<WorkerResponse>, transfer: Transferable[] = []) {
   self.postMessage(message, transfer)
 }
 
-function onProgress(info: ProgressInfo) {
-  if (info.status === 'progress_total') post({ type: 'progress', loaded: info.loaded, total: info.total })
-}
+const onProgress = progressForwarder((loaded, total) => {
+  post({ type: 'progress', loaded, total })
+})
 
-async function hasWebGPUAdapter(): Promise<boolean> {
-  if (!webgpuAvailable) return false
-  try {
-    return (await navigator.gpu.requestAdapter()) !== null
-  } catch {
-    return false
-  }
-}
-
-async function load(modelId: string, device: 'webgpu' | 'wasm', dtype: Dtype) {
-  await model?.dispose()
-  model = null
-  processor = await AutoProcessor.from_pretrained(modelId, { progress_callback: onProgress })
-  model = await AutoModel.from_pretrained(modelId, { device, dtype, progress_callback: onProgress })
+async function runModel(m: PreTrainedModel, p: Processor, raw: RawImage): Promise<Tensor> {
+  const inputs = (await p(raw)) as { pixel_values: Tensor }
+  const { logits } = (await m(inputs)) as { logits: Tensor }
+  disposeTensors(inputs)
+  return logits
 }
 
 async function handleLoad({ modelId, device, dtype }: Extract<WorkerRequest, { type: 'load' }>) {
   const start = performance.now()
-  const gpuOk = await hasWebGPUAdapter()
-  let resolved: 'webgpu' | 'wasm' = device === 'auto' ? (gpuOk ? 'webgpu' : 'wasm') : device
-  let fallbackReason: string | undefined
-  try {
-    await load(modelId, resolved, dtype)
-  } catch (err) {
-    if (device !== 'auto' || resolved === 'wasm') throw err
-    fallbackReason = `WebGPU failed: ${errorMessage(err)}`
-    resolved = 'wasm'
-    await load(modelId, resolved, dtype)
-  }
-  post({ type: 'loaded', device: resolved, dtype, ms: performance.now() - start, webgpuAvailable: gpuOk, fallbackReason })
+  await model?.dispose()
+  model = null
+  processor = await AutoProcessor.from_pretrained(modelId, { progress_callback: onProgress })
+  const proc = processor
+  const result = await loadFirstWorking<PreTrainedModel>(
+    await backendCandidates(device, dtype),
+    (b) => AutoModel.from_pretrained(modelId, { device: b.device, dtype: b.dtype, progress_callback: onProgress }),
+    async (m) => {
+      const logits = await runModel(m, proc, new RawImage(new Uint8ClampedArray(64 * 64 * 3).fill(128), 64, 64, 3))
+      logits.dispose()
+    },
+    (m) => m.dispose(),
+  )
+  model = result.model
+  post({
+    type: 'loaded',
+    device: result.backend.device,
+    dtype: result.backend.dtype,
+    ms: performance.now() - start,
+    webgpuAvailable: await hasWebGPUAdapter(),
+    fallbackReason: result.fallbackReason,
+  })
 }
 
-async function handleSegment({ image, maxMaskSide }: Extract<WorkerRequest, { type: 'segment' }>) {
+async function handleSegment({ image, labelMaxSide, groups = [] }: Extract<WorkerRequest, { type: 'segment' }>) {
   if (!model || !processor) throw new Error('Model not loaded')
 
   let t = performance.now()
-  const canvas = new OffscreenCanvas(image.width, image.height)
-  const ctx = canvas.getContext('2d')
-  if (!ctx) throw new Error('OffscreenCanvas 2D context unavailable')
-  ctx.drawImage(image, 0, 0)
-  image.close()
-  const raw = RawImage.fromCanvas(canvas).rgb()
-  const inputs = (await processor(raw)) as { pixel_values: Tensor }
+  const { raw, width: imageWidth, height: imageHeight } = rawImageFromBitmap(image)
   const preprocess = performance.now() - t
 
   t = performance.now()
-  const { logits } = (await model(inputs)) as { logits: Tensor }
+  const logits = await runModel(model, processor, raw)
   const inference = performance.now() - t
 
   t = performance.now()
-  const scale = Math.min(1, maxMaskSide / Math.max(canvas.width, canvas.height))
-  const width = Math.round(canvas.width * scale)
-  const height = Math.round(canvas.height * scale)
-  const upsampled = await interpolate_4d(logits, { size: [height, width], mode: 'bilinear' })
-  const labels = argmaxChannels(upsampled.data as Float32Array, upsampled.dims[1] ?? 0, width * height)
-  inputs.pixel_values.dispose()
+  const [, channels = 0, lh = 0, lw = 0] = logits.dims
+  const data = logits.data as Float32Array
+  // Per-group probability at the model's output size, then one bilinear upsample per group to full size.
+  const groupMasks = groups.map((g) =>
+    resizeBilinearToUint8(groupProbability(data, channels, lw, lh, g), lw, lh, imageWidth, imageHeight),
+  )
+
+  let labels: Uint8Array | null = null
+  let width = 0
+  let height = 0
+  if (labelMaxSide) {
+    const scale = Math.min(1, labelMaxSide / Math.max(imageWidth, imageHeight))
+    width = Math.round(imageWidth * scale)
+    height = Math.round(imageHeight * scale)
+    const upsampled = await interpolate_4d(logits, { size: [height, width], mode: 'bilinear' })
+    labels = argmaxChannels(upsampled.data as Float32Array, channels, width * height)
+    upsampled.dispose()
+  }
   logits.dispose()
-  upsampled.dispose()
   const postprocess = performance.now() - t
 
-  post({ type: 'result', labels, width, height, timings: { preprocess, inference, postprocess } }, [labels.buffer])
+  const transfer: Transferable[] = groupMasks.map((m) => m.buffer)
+  if (labels) transfer.push(labels.buffer)
+  post(
+    {
+      type: 'result',
+      labels,
+      width,
+      height,
+      groupMasks,
+      imageWidth,
+      imageHeight,
+      timings: { preprocess, inference, postprocess },
+    },
+    transfer,
+  )
 }
 
 /** data is [C, H*W] (batch 1); returns the winning channel per pixel. */
@@ -117,10 +135,6 @@ function argmaxChannels(data: Float32Array, channels: number, pixels: number): U
     out[p] = best
   }
   return out
-}
-
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err)
 }
 
 self.onmessage = (event: MessageEvent<WorkerRequest>) => {

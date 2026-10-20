@@ -56,8 +56,9 @@ const STEPS: Step[] = [
           Your outfits are shown on photos of you. You'll take three photos (front, side and back) wearing tight
           thermal clothing, and {APP_CONFIG.name} removes the background.
         </p>
-        <p className="bg-accent-soft rounded-2xl p-4">
-          Base model capture is coming in the next update. For now, finish setup and explore the app.
+        <p className="text-muted">
+          It takes about five minutes. A friend or a tripod helps, and the self-timer gives you time to get into
+          position.
         </p>
       </div>
     ),
@@ -127,13 +128,31 @@ export function OnboardingFlow() {
         {step.body}
       </div>
 
-      <div className="pb-4">
-        <Button className="w-full" onClick={() => {
-            if (isLast) void finish()
-            else setIndex(index + 1)
-          }}>
-          {isLast ? 'Finish setup' : 'Continue'}
-        </Button>
+      <div className="space-y-2 pb-4">
+        {isLast ? (
+          <>
+            <Button
+              className="w-full"
+              onClick={() => {
+                void navigate('/base-model?onboarding=1')
+              }}
+            >
+              Create my base model
+            </Button>
+            <Button variant="ghost" className="w-full" onClick={() => void finish()}>
+              Skip for now
+            </Button>
+          </>
+        ) : (
+          <Button
+            className="w-full"
+            onClick={() => {
+              setIndex(index + 1)
+            }}
+          >
+            Continue
+          </Button>
+        )}
       </div>
     </div>
   )

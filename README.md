@@ -4,7 +4,13 @@ An offline-first virtual wardrobe PWA for iPhone. You photograph yourself and yo
 
 See [`SPEC.md`](SPEC.md) for the full product spec, [`DECISIONS.md`](DECISIONS.md) for design and technical decisions, and [`TESTING.md`](TESTING.md) for the manual iPhone checklist.
 
-**Status:** Phase 1 (Foundation) is complete: app shell, tabs, local database, offline support, installability and onboarding. Camera and AI cut-out arrive in Phase 2.
+**Status:** Phases 1 (foundation) and 2 (base model & capture) are built. You can create your base model: camera or library photos, on-device background removal (SegFormer), optional edge refinement (SlimSAM), pose landmarks (MediaPipe), and a brush editor. Adding clothing items comes in Phase 3.
+
+### Code map
+- `src/ml/`: ML behind swappable interfaces (`providers.ts`: `SegmentationProvider`, `EdgeRefiner`, `PoseProvider`), Web Workers, model catalogue, auto backend selection and crash fallback (`mlConfig.ts`).
+- `src/lib/mask/`: pure mask operations (morphology, feathering, resampling, RLE). `src/lib/gesture/`: reusable Pointer Events gesture layer and transform math.
+- `src/components/ViewportCanvas.tsx`: pan / pinch-zoom / rotate / double-tap canvas, reused by every interactive canvas.
+- `src/features/capture/`: camera, review and brush editor. `src/features/baseModel/`: base model flow, processing pipeline, storage.
 
 ## Setup
 

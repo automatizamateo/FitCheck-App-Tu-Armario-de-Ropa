@@ -23,14 +23,24 @@ export interface Landmark {
 
 export type LandmarkName =
   | 'nose'
+  | 'leftEar'
+  | 'rightEar'
   | 'leftShoulder'
   | 'rightShoulder'
+  | 'leftElbow'
+  | 'rightElbow'
+  | 'leftWrist'
+  | 'rightWrist'
   | 'leftHip'
   | 'rightHip'
   | 'leftKnee'
   | 'rightKnee'
   | 'leftAnkle'
   | 'rightAnkle'
+  | 'leftHeel'
+  | 'rightHeel'
+  | 'leftFootIndex'
+  | 'rightFootIndex'
 
 export type PoseLandmarks = Partial<Record<LandmarkName, Landmark>>
 
@@ -42,10 +52,18 @@ export interface Transform {
 }
 
 export interface BaseModelView {
-  image: Blob
+  image: Blob // full photo frame with transparent background (not cropped), so overlays line up
   width: number
   height: number
   landmarks: PoseLandmarks
+  original?: Blob // only when Settings.keepOriginalPhotos
+}
+
+/** Views confirmed so far while creating a base model; survives the page being killed. */
+export interface BaseModelDraft {
+  id: 'draft'
+  views: Partial<Record<View, BaseModelView>>
+  startedAt: number
 }
 
 export interface BaseModel {
@@ -109,10 +127,28 @@ export interface Style {
   builtIn: boolean
 }
 
+export type MlDevice = 'auto' | 'webgpu' | 'wasm'
+export type MlDtype = 'q8' | 'fp16' | 'fp32'
+
+export interface MlSettings {
+  model: string // 'auto' or a segmentation model id
+  device: MlDevice
+  dtype: 'auto' | MlDtype
+  refineEdges: 'auto' | 'on' | 'off'
+  refineBenchmarkMs?: number // last edge-refinement time on this device
+  refineCrashed?: boolean // iOS killed the page while refining
+  webgpuBroken?: boolean // WebGPU failed to load or run inside the worker
+  crashFallback?: boolean // iOS killed the page with the default model → auto uses the light one
+  lastUsed?: { modelId: string; device: 'webgpu' | 'wasm'; dtype: MlDtype }
+  pendingNotice?: string // shown once, then cleared
+}
+
 export interface Settings {
   id: 'settings'
   unusedThresholdDays: number
   keepOriginalPhotos: boolean
   onboardingDone: boolean
+  captureTipsSeen: boolean
+  ml: MlSettings
   lastBackupAt?: number
 }

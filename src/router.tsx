@@ -1,6 +1,7 @@
 import { createHashRouter, Navigate } from 'react-router'
 import { AppShell } from './components/AppShell'
 import { OnboardingGate } from './components/OnboardingGate'
+import { BaseModelFlow } from './features/baseModel/BaseModelFlow'
 import { SegmentationLab } from './lab/SegmentationLab'
 import { OnboardingFlow } from './onboarding/OnboardingFlow'
 import { CalendarPage } from './pages/CalendarPage'
@@ -16,6 +17,8 @@ export const router = createHashRouter([
     element: <OnboardingGate />,
     children: [
       { path: '/welcome', element: <OnboardingFlow /> },
+      // ?view=front|side|back retakes one view; ?onboarding=1 finishes onboarding when done.
+      { path: '/base-model', element: <BaseModelFlow /> },
       // Hidden ML spike screen: tap the version line in Settings 5 times.
       { path: '/lab/segmentation', element: <SegmentationLab /> },
       {
