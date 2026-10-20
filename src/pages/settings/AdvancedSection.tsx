@@ -31,10 +31,25 @@ export function AdvancedSection() {
 
   if (!settings) return null
   const ml = settings.ml
-  const resolved = resolveSegmentationConfig(ml)
-  const set = (changes: Partial<MlSettings>) => void updateMlSettings(changes)
-
   const ios = isIOS()
+  const resolved = resolveSegmentationConfig(ml, ios)
+  const set = (changes: Partial<MlSettings>) => void updateMlSettings(changes)
+  const modelHint =
+    ml.model !== 'auto'
+      ? undefined
+      : ios && !ml.iosVerifiedRuns
+        ? `Auto: ${modelName(resolved.modelId)} until a photo finishes on this device`
+        : `Auto: ${modelName(resolved.modelId)}`
+  const deviceHint =
+    ml.device !== 'auto'
+      ? ios && ml.device === 'webgpu'
+        ? '⚠ May crash on some devices'
+        : undefined
+      : ios
+        ? 'Auto: CPU on iPhone and iPad'
+        : ml.webgpuBroken
+          ? 'Auto: CPU (GPU failed before)'
+          : undefined
   const refineHint =
     ml.refineEdges === 'on'
       ? ios
@@ -54,7 +69,7 @@ export function AdvancedSection() {
       <div className="bg-surface border-line divide-line divide-y overflow-hidden rounded-2xl border">
         <Disclosure label="AI processing">
           <div className="divide-line -mx-4 divide-y">
-            <Row label="Background model" hint={ml.model === 'auto' ? `Auto: ${modelName(resolved.modelId)}` : undefined}>
+            <Row label="Background model" hint={modelHint}>
               <Select
                 value={ml.model}
                 onChange={(v) => {
@@ -63,7 +78,7 @@ export function AdvancedSection() {
                 options={[['auto', 'Auto'], ...SEGMENTATION_MODELS.map((m) => [m.id, m.label] as [string, string])]}
               />
             </Row>
-            <Row label="Processor" hint={ml.device === 'auto' && ml.webgpuBroken ? 'Auto: CPU (GPU failed before)' : undefined}>
+            <Row label="Processor" hint={deviceHint}>
               <Select
                 value={ml.device}
                 onChange={(v) => {
@@ -109,6 +124,21 @@ export function AdvancedSection() {
                 turns this off again by itself.
               </p>
             )}
+            <Row
+              label="Detect pose"
+              hint={ml.skipPose ? 'Off: it ran out of memory twice. Clothes are aligned by hand' : 'Helps line clothes up automatically'}
+            >
+              <Select
+                value={ml.skipPose ? 'off' : 'on'}
+                onChange={(v) => {
+                  set({ skipPose: v === 'off', poseCrashes: undefined })
+                }}
+                options={[
+                  ['on', 'On'],
+                  ['off', 'Off'],
+                ]}
+              />
+            </Row>
             {ml.lastUsed && (
               <Row label="Last used">
                 <span className="text-muted text-right text-xs">
@@ -141,7 +171,14 @@ export function AdvancedSection() {
                 type="button"
                 className="text-accent h-11 text-sm font-medium"
                 onClick={() => {
-                  set({ ...DEFAULT_ML_SETTINGS, refineBenchmarkMs: undefined, webgpuBroken: undefined, pendingNotice: undefined })
+                  set({
+                    ...DEFAULT_ML_SETTINGS,
+                    refineBenchmarkMs: undefined,
+                    webgpuBroken: undefined,
+                    pendingNotice: undefined,
+                    poseCrashes: undefined,
+                    skipPose: undefined,
+                  })
                 }}
               >
                 Reset to automatic

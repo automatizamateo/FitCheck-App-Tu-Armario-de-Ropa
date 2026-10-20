@@ -1,9 +1,9 @@
 import type { ViewportHandle, ViewportTool } from '../../components/ViewportCanvas'
 import type { LandmarkName, PoseLandmarks } from '../../domain/types'
 import type { Point } from '../../lib/gesture/similarity'
-import { History } from '../../lib/history'
+import { MaskHistory } from '../../lib/mask/maskHistory'
 import { featherAlpha } from '../../lib/mask/ops'
-import { decodeRLE, encodeRLE } from '../../lib/mask/rle'
+import { releaseCanvas, trackCanvas } from '../../lib/resources'
 
 export type BrushMode = 'add' | 'erase'
 
@@ -31,10 +31,10 @@ const SKELETON: [LandmarkName, LandmarkName][] = [
 ]
 
 const DOT_DELAY_MS = 330 // a single tap paints a dot, unless it turns out to be a double-tap
-const UNDO_STEPS = 30
+const UNDO_BYTES = 2_000_000
 
 function makeCanvas(w: number, h: number) {
-  const canvas = document.createElement('canvas')
+  const canvas = trackCanvas(document.createElement('canvas'))
   canvas.width = w
   canvas.height = h
   const ctx = canvas.getContext('2d', { willReadFrequently: true })
@@ -44,8 +44,10 @@ function makeCanvas(w: number, h: number) {
 
 /**
  * Imperative brush editor for a binary mask over a photo, kept outside React so pointer moves never
- * re-render. The mask lives in a canvas (alpha = in/out) so painting is GPU-cheap; after each stroke
- * it is snapped to 0/1 and stored run-length encoded in the undo history.
+ * re-render. One full-size canvas holds the cut-out itself (photo pixels, alpha = in/out), so painting
+ * is GPU-cheap and there is no separate mask layer. After each stroke the mask is snapped to 0/1 and
+ * only the changed area goes into a byte-capped undo history. The preview canvas exists only while
+ * previewing.
  */
 export class MaskEditorEngine {
   readonly width: number
@@ -55,10 +57,8 @@ export class MaskEditorEngine {
 
   private readonly photo: ImageBitmap
   private readonly landmarks: PoseLandmarks
-  private readonly maskLayer: ReturnType<typeof makeCanvas>
-  private readonly cutoutLayer: ReturnType<typeof makeCanvas>
-  private dirty = true
-  private readonly history: History<Uint32Array>
+  private readonly cutout: ReturnType<typeof makeCanvas>
+  private readonly history: MaskHistory
   private state: MaskEditorState
   private stroke: { start: Point; painted: boolean } | null = null
   private cursor: Point | null = null
@@ -71,9 +71,8 @@ export class MaskEditorEngine {
     this.height = photo.height
     this.landmarks = landmarks
     this.state = state
-    this.maskLayer = makeCanvas(this.width, this.height)
-    this.cutoutLayer = makeCanvas(this.width, this.height)
-    this.history = new History(encodeRLE(initialMask), UNDO_STEPS)
+    this.cutout = makeCanvas(this.width, this.height)
+    this.history = new MaskHistory(initialMask, this.width, this.height, UNDO_BYTES)
     this.writeMask(initialMask)
   }
 
@@ -85,8 +84,10 @@ export class MaskEditorEngine {
 
   setState(state: MaskEditorState) {
     this.state = state
-    if (!state.preview) this.preview = null
-    else if (this.preview?.feather !== state.feather) this.preview = { canvas: this.buildPreview(state.feather), feather: state.feather }
+    if (!state.preview || this.preview?.feather !== state.feather) {
+      releaseCanvas(this.preview?.canvas)
+      this.preview = state.preview ? { canvas: this.buildPreview(state.feather), feather: state.feather } : null
+    }
     this.viewport?.invalidate()
   }
 
@@ -96,19 +97,19 @@ export class MaskEditorEngine {
 
   undo() {
     const s = this.history.undo()
-    if (s) this.restore(s)
+    if (s) this.writeMask(s)
     this.emitHistory()
   }
 
   redo() {
     const s = this.history.redo()
-    if (s) this.restore(s)
+    if (s) this.writeMask(s)
     this.emitHistory()
   }
 
   /** Current mask as 0/1. */
   getMask(): Uint8Array {
-    const img = this.maskLayer.ctx.getImageData(0, 0, this.width, this.height)
+    const img = this.cutout.ctx.getImageData(0, 0, this.width, this.height)
     const out = new Uint8Array(this.width * this.height)
     for (let i = 0; i < out.length; i++) out[i] = (img.data[i * 4 + 3] ?? 0) >= 128 ? 1 : 0
     return out
@@ -116,6 +117,9 @@ export class MaskEditorEngine {
 
   dispose() {
     this.cancelPendingDot()
+    releaseCanvas(this.preview?.canvas)
+    this.preview = null
+    releaseCanvas(this.cutout.canvas)
   }
 
   readonly cancelPendingDot = () => {
@@ -156,7 +160,7 @@ export class MaskEditorEngine {
     },
     onCancel: () => {
       // A second finger arrived: this was a pinch, not a stroke.
-      if (this.stroke?.painted) this.restore(this.history.current)
+      if (this.stroke?.painted) this.writeMask(this.history.current)
       this.stroke = null
       this.cursor = null
     },
@@ -169,21 +173,12 @@ export class MaskEditorEngine {
       drawCheckerboard(ctx, width, height)
       ctx.drawImage(this.preview.canvas, 0, 0)
     } else {
-      if (this.dirty) {
-        const c = this.cutoutLayer.ctx
-        c.globalCompositeOperation = 'source-over'
-        c.clearRect(0, 0, width, height)
-        c.drawImage(this.maskLayer.canvas, 0, 0)
-        c.globalCompositeOperation = 'source-in'
-        c.drawImage(this.photo, 0, 0)
-        this.dirty = false
-      }
       ctx.fillStyle = '#1c1917'
       ctx.fillRect(0, 0, width, height)
       ctx.globalAlpha = 0.3 // removed areas stay faintly visible so you can paint them back
       ctx.drawImage(this.photo, 0, 0)
       ctx.globalAlpha = 1
-      ctx.drawImage(this.cutoutLayer.canvas, 0, 0)
+      ctx.drawImage(this.cutout.canvas, 0, 0)
     }
 
     const scale = this.viewport?.scale() ?? 1
@@ -199,42 +194,38 @@ export class MaskEditorEngine {
   }
 
   private paint(from: Point, to: Point) {
-    const ctx = this.maskLayer.ctx
+    const ctx = this.cutout.ctx
+    const r = this.state.brushSize / (this.viewport?.scale() ?? 1) / 2
     ctx.save()
-    ctx.globalCompositeOperation = this.state.mode === 'add' ? 'source-over' : 'destination-out'
-    ctx.strokeStyle = '#fff'
-    ctx.lineCap = 'round'
-    ctx.lineWidth = this.state.brushSize / (this.viewport?.scale() ?? 1)
-    ctx.beginPath()
-    ctx.moveTo(from.x, from.y)
-    ctx.lineTo(to.x, to.y)
-    ctx.stroke()
+    if (this.state.mode === 'erase') {
+      ctx.globalCompositeOperation = 'destination-out'
+      ctx.fill(capsule(from, to, r))
+    } else {
+      // Adding brings back the photo's own pixels under the brush.
+      ctx.clip(capsule(from, to, r))
+      ctx.drawImage(this.photo, 0, 0)
+    }
     ctx.restore()
-    this.dirty = true
     this.viewport?.invalidate()
   }
 
   private commit() {
     const mask01 = this.getMask()
     this.writeMask(mask01)
-    this.history.push(encodeRLE(mask01))
+    this.history.commit(mask01)
     this.emitHistory()
   }
 
-  private restore(rle: Uint32Array) {
-    this.writeMask(decodeRLE(rle, this.width * this.height))
-  }
-
+  /** Redraws the cut-out canvas from a 0/1 mask: alpha from the mask, colour from the photo. */
   private writeMask(mask01: Uint8Array) {
-    const { ctx } = this.maskLayer
+    const { ctx } = this.cutout
     const img = ctx.createImageData(this.width, this.height)
-    for (let i = 0; i < mask01.length; i++) {
-      const o = i * 4
-      img.data[o] = img.data[o + 1] = img.data[o + 2] = 255
-      img.data[o + 3] = mask01[i] ? 255 : 0
-    }
-    ctx.putImageData(img, 0, 0)
-    this.dirty = true
+    for (let i = 0; i < mask01.length; i++) img.data[i * 4 + 3] = mask01[i] ? 255 : 0
+    ctx.putImageData(img, 0, 0) // replaces every pixel, compositing doesn't apply
+    ctx.save()
+    ctx.globalCompositeOperation = 'source-in'
+    ctx.drawImage(this.photo, 0, 0)
+    ctx.restore()
     this.viewport?.invalidate()
   }
 
@@ -247,6 +238,28 @@ export class MaskEditorEngine {
     ctx.putImageData(img, 0, 0)
     return canvas
   }
+}
+
+/**
+ * The shape a round brush of radius r sweeps from `a` to `b`. Every part is wound clockwise on
+ * screen, so with the nonzero fill rule the overlaps add up instead of cancelling into holes.
+ */
+function capsule(a: Point, b: Point, r: number): Path2D {
+  const path = new Path2D()
+  path.arc(a.x, a.y, r, 0, Math.PI * 2)
+  path.moveTo(b.x + r, b.y)
+  path.arc(b.x, b.y, r, 0, Math.PI * 2)
+  const len = Math.hypot(b.x - a.x, b.y - a.y)
+  if (len > 0) {
+    const nx = (-(b.y - a.y) / len) * r
+    const ny = ((b.x - a.x) / len) * r
+    path.moveTo(a.x - nx, a.y - ny)
+    path.lineTo(b.x - nx, b.y - ny)
+    path.lineTo(b.x + nx, b.y + ny)
+    path.lineTo(a.x + nx, a.y + ny)
+    path.closePath()
+  }
+  return path
 }
 
 function drawCheckerboard(ctx: CanvasRenderingContext2D, w: number, h: number) {

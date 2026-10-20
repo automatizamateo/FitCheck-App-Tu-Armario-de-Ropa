@@ -1,4 +1,5 @@
 import { featherAlpha } from './mask/ops'
+import { releaseCanvas } from './resources'
 
 /**
  * Encodes as WebP when the browser can (keeps alpha, ~5–10× smaller than PNG). Safari falls back to
@@ -24,6 +25,7 @@ export async function encodeJpeg(source: CanvasImageSource, width: number, heigh
   return new Promise((resolve, reject) => {
     canvas.toBlob(
       (b) => {
+        releaseCanvas(canvas)
         if (b) resolve(b)
         else reject(new Error('Could not encode JPEG'))
       },
@@ -51,5 +53,9 @@ export async function exportCutout(
   const alpha = featherAlpha(mask, width, height, featherPx)
   for (let i = 0; i < alpha.length; i++) pixels.data[i * 4 + 3] = alpha[i] ?? 0
   ctx.putImageData(pixels, 0, 0)
-  return encodeImage(canvas)
+  try {
+    return await encodeImage(canvas)
+  } finally {
+    releaseCanvas(canvas)
+  }
 }

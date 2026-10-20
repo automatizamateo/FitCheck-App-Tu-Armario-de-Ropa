@@ -2,6 +2,7 @@ import { getSettings, updateMlSettings } from '../db/settings'
 import { clearInFlight, markInFlight, takeLeftover } from '../lib/crashGuard'
 import { debugLog } from '../lib/debugLog'
 import { isIOS } from '../lib/platform'
+import { formatResources } from '../lib/resources'
 import { crashRecovery, type InFlightMl } from './mlConfig'
 
 const KEY = 'fitcheck-ml-inflight'
@@ -11,19 +12,23 @@ export const stepName = (info: InFlightMl) => `${info.stage}.${info.step ?? 'run
 
 /**
  * Runs one heavy step with a crash marker written before it starts, so an iOS out-of-memory kill is
- * noticed on the next launch, and logs its start, duration and errors to the debug log.
+ * noticed on the next launch. Logs its start and end with duration and live resources
+ * ([w = workers, b = bitmaps, c = canvases, MB of their pixels]), or its error.
  */
 export async function guardMl<T>(info: InFlightMl, task: () => Promise<T>): Promise<T> {
   const name = stepName(info)
   markInFlight(KEY, info)
-  debugLog(`▶ ${name}`, info.modelId || info.device ? { model: info.modelId, device: info.device } : undefined)
+  const detail = [info.modelId, info.device].filter(Boolean).join(' ')
+  debugLog(`▶ ${name}${detail ? ` (${detail})` : ''} ${formatResources()}`)
   const start = performance.now()
   try {
     const result = await task()
-    debugLog(`✓ ${name} ${Math.round(performance.now() - start)} ms`)
+    debugLog(`✓ ${name} ${Math.round(performance.now() - start)} ms ${formatResources()}`)
     return result
   } catch (err) {
-    debugLog(`✗ ${name} ${Math.round(performance.now() - start)} ms: ${err instanceof Error ? err.message : String(err)}`)
+    debugLog(
+      `✗ ${name} ${Math.round(performance.now() - start)} ms: ${err instanceof Error ? err.message : String(err)} ${formatResources()}`,
+    )
     throw err
   } finally {
     clearInFlight(KEY)

@@ -1,3 +1,5 @@
+import { trackWorker } from '../lib/resources'
+
 interface ProgressMessage {
   type: 'progress'
   loaded: number
@@ -23,6 +25,7 @@ export class WorkerRpc<Res extends { type: string }> {
   private ensure(): Worker {
     if (this.worker) return this.worker
     const worker = this.create()
+    trackWorker(1)
     worker.onmessage = (event: MessageEvent<Res | ProgressMessage | ErrorMessage>) => {
       const msg = event.data
       if (msg.type === 'progress') {
@@ -54,7 +57,12 @@ export class WorkerRpc<Res extends { type: string }> {
     })
   }
 
+  get alive(): boolean {
+    return this.worker !== null
+  }
+
   terminate() {
+    if (this.worker) trackWorker(-1)
     this.worker?.terminate()
     this.worker = null
     this.pending?.reject(new Error('Worker terminated'))

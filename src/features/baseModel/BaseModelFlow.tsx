@@ -7,6 +7,7 @@ import { encodeJpeg, exportCutout } from '../../lib/encode'
 import { debugLog } from '../../lib/debugLog'
 import { loadImageFile } from '../../lib/image'
 import { isIOS } from '../../lib/platform'
+import { trackBitmap } from '../../lib/resources'
 import { requestPersistentStorage } from '../../lib/storage'
 import { clearRecovery, readRecovery, type PendingRecovery } from '../../ml/crashRecovery'
 import { estimateDownloadMB } from '../../ml/downloads'
@@ -95,9 +96,9 @@ export function BaseModelFlow() {
         setPhase({ name: 'tips', then: resuming ? 'resume' : 'capture' })
       }
       const est = await estimateDownloadMB(
-        resolveSegmentationConfig(settings.ml),
+        resolveSegmentationConfig(settings.ml, isIOS()),
         shouldRefine(settings.ml, isIOS()),
-        'gpu' in navigator && !settings.ml.webgpuBroken,
+        'gpu' in navigator && !settings.ml.webgpuBroken && !isIOS(),
       )
       if (!isCancelled()) setDownloadMB(est)
     })()
@@ -142,7 +143,7 @@ export function BaseModelFlow() {
       setPhotoError(null)
       let bitmap: ImageBitmap
       try {
-        bitmap = (await loadImageFile(blob, MAX_SIDE)).bitmap
+        bitmap = trackBitmap((await loadImageFile(blob, MAX_SIDE)).bitmap)
       } catch {
         setPhotoError('That photo could not be opened. Try another one.')
         return
@@ -166,7 +167,7 @@ export function BaseModelFlow() {
   const retryAfterCrash = async (blob: Blob) => {
     leaveRecovery()
     try {
-      await run((await loadImageFile(blob, MAX_SIDE)).bitmap)
+      await run(trackBitmap((await loadImageFile(blob, MAX_SIDE)).bitmap))
     } catch {
       void clearPendingPhoto()
       setPhotoError('That photo could not be opened. Take a new one.')

@@ -1,4 +1,5 @@
 import type { MlSettings } from '../domain/types'
+import { isIOS } from '../lib/platform'
 import { resolveSegmentationConfig } from './mlConfig'
 import {
   createSegmentationProvider,
@@ -15,24 +16,27 @@ export interface PipelineSession {
   segmentation(): SegmentationProvider
   poseDetector(): PoseProvider
   edgeRefiner(): EdgeRefiner
-  /** Frees SegFormer and pose memory before SlimSAM loads; they reload lazily for the next photo. */
-  releaseForRefine(): void
+  /** Frees the model and terminates its worker; the next segmentation() starts a fresh one. */
+  unloadSegmentation(): Promise<void>
+  unloadPose(): Promise<void>
   releaseRefiner(): void
 }
 
 /**
- * The models used by one capture flow. Created lazily so nothing downloads until needed, kept loaded
- * between views (reloading costs seconds), and all disposed together when the flow ends. The edge
- * refiner is the exception: it only lives for one refine step.
+ * The models used by one capture flow, created lazily. The pipeline is strictly sequential: each
+ * model is unloaded (worker terminated) before the next one loads, so at most one is ever in memory.
+ * That costs a reload per photo, which is what keeps iPhones from killing the page.
  */
 export class MlSession implements PipelineSession {
   private seg: SegmentationProvider | null = null
   private refiner: EdgeRefiner | null = null
   private pose: PoseProvider | null = null
   private readonly ml: MlSettings
+  private readonly ios: boolean
 
-  constructor(ml: MlSettings) {
+  constructor(ml: MlSettings, ios = isIOS()) {
     this.ml = ml
+    this.ios = ios
   }
 
   get settings(): MlSettings {
@@ -40,7 +44,7 @@ export class MlSession implements PipelineSession {
   }
 
   segmentation(): SegmentationProvider {
-    this.seg ??= createSegmentationProvider(resolveSegmentationConfig(this.ml))
+    this.seg ??= createSegmentationProvider(resolveSegmentationConfig(this.ml, this.ios))
     return this.seg
   }
 
@@ -54,10 +58,16 @@ export class MlSession implements PipelineSession {
     return this.pose
   }
 
-  releaseForRefine() {
-    this.seg?.dispose()
-    this.pose?.dispose()
-    this.seg = this.pose = null
+  async unloadSegmentation() {
+    const seg = this.seg
+    this.seg = null
+    await seg?.unload()
+  }
+
+  async unloadPose() {
+    const pose = this.pose
+    this.pose = null
+    await pose?.unload()
   }
 
   releaseRefiner() {
@@ -66,7 +76,9 @@ export class MlSession implements PipelineSession {
   }
 
   dispose() {
-    this.releaseForRefine()
+    this.seg?.dispose()
+    this.pose?.dispose()
+    this.seg = this.pose = null
     this.releaseRefiner()
   }
 }

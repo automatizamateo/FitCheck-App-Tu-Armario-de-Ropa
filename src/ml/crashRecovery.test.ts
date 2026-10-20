@@ -6,14 +6,17 @@ import { clearRecovery, guardMl, readRecovery, recoverFromMlCrash } from './cras
 import { LIGHT_SEGMENTATION_MODEL } from './models'
 
 /** Simulates iOS killing the page in the middle of `step`: the marker is written but never cleared. */
-async function crashDuring(stage: 'segment' | 'pose' | 'refine') {
-  void guardMl({ stage, step: 'run' }, () => new Promise(() => undefined))
+async function crashDuring(stage: 'segment' | 'pose' | 'refine', step: 'load' | 'run' = 'run') {
+  void guardMl({ stage, step }, () => new Promise(() => undefined))
   await Promise.resolve()
 }
 
+const IPHONE = { userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)', maxTouchPoints: 5 }
+const DESKTOP = { userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)', maxTouchPoints: 0 }
+
 beforeEach(() => {
   vi.stubGlobal('localStorage', memoryStorage())
-  vi.stubGlobal('navigator', { userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)', maxTouchPoints: 5 })
+  vi.stubGlobal('navigator', IPHONE)
 })
 
 afterEach(async () => {
@@ -29,6 +32,7 @@ describe('launch after a crash', () => {
   })
 
   it('records a pending recovery (no auto-resume) and steps down one level per crash', async () => {
+    vi.stubGlobal('navigator', DESKTOP) // on iOS, auto already starts at B0 + CPU
     await updateMlSettings({ refineEdges: 'on' })
 
     await crashDuring('refine')
@@ -58,5 +62,22 @@ describe('launch after a crash', () => {
     clearRecovery()
     await recoverFromMlCrash()
     expect(readRecovery()).toBeNull()
+  })
+
+  it('the reported iPhone case: killed at pose.load with B2 on WebGPU → B0 + WASM, then pose off', async () => {
+    await updateMlSettings({ model: 'Xenova/segformer_b2_clothes', device: 'webgpu' })
+    await crashDuring('pose', 'load')
+    await recoverFromMlCrash()
+    let ml = (await getSettings()).ml
+    expect(readRecovery()?.crashed).toEqual({ stage: 'pose', step: 'load' })
+    expect(ml).toMatchObject({ model: LIGHT_SEGMENTATION_MODEL, device: 'wasm', poseCrashes: 1 })
+    expect(ml.skipPose).toBeFalsy()
+
+    clearRecovery()
+    await crashDuring('pose', 'load')
+    await recoverFromMlCrash()
+    ml = (await getSettings()).ml
+    expect(ml.skipPose).toBe(true)
+    expect(ml.pendingNotice).toMatch(/pose detection is now off/)
   })
 })

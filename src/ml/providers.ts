@@ -1,7 +1,8 @@
 import type { PoseLandmarks } from '../domain/types'
 import type { SegmentationConfig } from './mlConfig'
 import { CLOTHES_LABELS, PERSON_CLASSES, SLIMSAM, type Dtype } from './models'
-import type { PoseResponse, RefineResultMessage, SamResponse } from './protocol'
+import { withTimeout } from '../lib/timeout'
+import type { DisposedMessage, PoseResponse, RefineResultMessage, SamResponse } from './protocol'
 import { SegmentationClient } from './segmentationClient'
 import { WorkerRpc } from './workerRpc'
 
@@ -28,6 +29,8 @@ export interface SegmentationProvider {
   load(onProgress?: ProgressFn): Promise<LoadInfo>
   /** One 0–255 probability map per group of class indices, at the image's resolution. */
   segmentGroups(image: ImageBitmap, groups: number[][]): Promise<{ masks: Uint8Array[]; width: number; height: number; ms: number }>
+  /** Frees the model inside its worker, then terminates the worker. Resolves once it is gone. */
+  unload(): Promise<void>
   dispose(): void
 }
 
@@ -41,6 +44,8 @@ export interface EdgeRefiner {
 export interface PoseProvider {
   load(onProgress?: ProgressFn): Promise<void>
   detect(image: ImageBitmap): Promise<{ landmarks: PoseLandmarks; ms: number }>
+  /** Closes the landmarker inside its worker, then terminates the worker. */
+  unload(): Promise<void>
   dispose(): void
 }
 
@@ -83,6 +88,10 @@ class SegformerProvider implements SegmentationProvider {
     const start = performance.now()
     const res = await this.client.segment(image, { groups })
     return { masks: res.groupMasks, width: res.imageWidth, height: res.imageHeight, ms: performance.now() - start }
+  }
+
+  unload() {
+    return this.client.unload()
   }
 
   dispose() {
@@ -135,7 +144,7 @@ export class SlimSamRefiner implements EdgeRefiner {
   }
 }
 
-/** MediaPipe Pose Landmarker (lite), CPU delegate. */
+/** MediaPipe Pose Landmarker (lite), CPU delegate, in its own worker. */
 export class MediaPipePoseProvider implements PoseProvider {
   private readonly rpc = new WorkerRpc<PoseResponse>(
     () => new Worker(new URL('./pose.worker.ts', import.meta.url), { type: 'module' }),
@@ -152,6 +161,15 @@ export class MediaPipePoseProvider implements PoseProvider {
   async detect(image: ImageBitmap) {
     const res = await this.rpc.request<Extract<PoseResponse, { type: 'pose' }>>({ type: 'detect', image }, [image])
     return { landmarks: res.landmarks, ms: res.ms }
+  }
+
+  async unload() {
+    if (!this.rpc.alive) return
+    try {
+      await withTimeout(this.rpc.request<DisposedMessage>({ type: 'dispose' }), 3000, 'Unloading pose')
+    } finally {
+      this.rpc.terminate()
+    }
   }
 
   dispose() {

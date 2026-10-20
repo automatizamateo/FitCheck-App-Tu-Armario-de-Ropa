@@ -1,5 +1,6 @@
 import type { Device, Dtype } from './models'
-import type { LoadedMessage, SegmentResultMessage, WorkerResponse } from './protocol'
+import { withTimeout } from '../lib/timeout'
+import type { DisposedMessage, LoadedMessage, SegmentResultMessage, WorkerResponse } from './protocol'
 import { WorkerRpc } from './workerRpc'
 
 export type LoadResult = LoadedMessage
@@ -22,6 +23,16 @@ export class SegmentationClient {
   /** Transfers (and so consumes) `image`. */
   segment(image: ImageBitmap, options: { labelMaxSide?: number; groups?: number[][] }): Promise<SegmentResult> {
     return this.rpc.request<SegmentResult>({ type: 'segment', image, ...options }, [image])
+  }
+
+  /** Asks the worker to free its model (ONNX sessions, WebGPU device), then terminates it either way. */
+  async unload(): Promise<void> {
+    if (!this.rpc.alive) return
+    try {
+      await withTimeout(this.rpc.request<DisposedMessage>({ type: 'dispose' }), 3000, 'Unloading the model')
+    } finally {
+      this.rpc.terminate()
+    }
   }
 
   terminate() {

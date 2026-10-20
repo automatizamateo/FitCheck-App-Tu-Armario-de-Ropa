@@ -71,9 +71,20 @@ function handleDetect(image: ImageBitmap) {
   post({ type: 'pose', landmarks, ms: performance.now() - start })
 }
 
+function handleDispose() {
+  landmarker?.close()
+  landmarker = null
+  post({ type: 'disposed' })
+}
+
 self.onmessage = (event: MessageEvent<PoseRequest>) => {
   const message = event.data
-  const task = message.type === 'load' ? handleLoad() : Promise.resolve().then(() => {
+  const task = Promise.resolve().then(() => {
+    if (message.type === 'load') return handleLoad()
+    if (message.type === 'dispose') {
+      handleDispose()
+      return
+    }
     handleDetect(message.image)
   })
   task.catch((err: unknown) => {

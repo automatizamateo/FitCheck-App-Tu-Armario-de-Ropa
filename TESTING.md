@@ -79,6 +79,9 @@ Before you start: update the installed app (open it twice, or delete it and re-a
 - [ ] **Memory:** if the app reloads by itself while processing, it opens a **recovery screen** and does not start processing by itself. The screen explains what it switched to (refine off → lighter model → CPU). "Retry with the same photo" processes the same photo again with the lighter setup. Report what the screen said, and copy Settings → Advanced → Debug log.
 - [ ] **Refine edges opt-in (iPhone):** in Settings → Advanced, Refine edges says "Auto: off on iPhone and iPad". Choosing "On (may crash)" shows a warning. With it on, processing goes Removing background ✓ → Detecting pose ✓ → Refining edges. If refining fails or takes over 15 s, the review screen still opens with the basic cut-out and a note. If the app gets killed instead, the recovery screen appears and Refine edges is back to Off.
 - [ ] **Debug log:** Settings → Advanced → Debug log lists `launch`, `pipeline start`, then `▶`/`✓` lines with ms for each step. Copy works.
+- [ ] **One model at a time:** in the debug log, `segment.unloaded` appears before `▶ pose.load`, and `pose.unloaded` after pose. The `[w…]` count is `w0` or `w1`, never higher.
+- [ ] **Safe iOS start:** after Reset to automatic (or on a fresh install), the first photo's `pipeline start` line shows `segformer_b0_clothes`, `wasm`, `q8`. After one photo finishes, the next capture session shows `segformer_b2_clothes`, still `wasm`.
+- [ ] **Pose fallback:** if pose fails or times out, the review screen still opens with the cut-out and a "line clothes up by hand" note. After two app kills during pose, the recovery screen says pose detection is off, and Settings → Advanced → Detect pose shows Off.
 - [ ] Settings → Advanced: switch Background model to B0, or Processor to CPU, and retake a view. It still works, and "Last used" reflects the choice. "Reset to automatic" restores Auto.
 
 ### Report back

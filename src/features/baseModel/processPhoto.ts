@@ -1,17 +1,22 @@
 import type { MlSettings, PoseLandmarks } from '../../domain/types'
-import { updateMlSettings } from '../../db/settings'
+import { getSettings, updateMlSettings } from '../../db/settings'
 import { debugLog } from '../../lib/debugLog'
 import { EDGE_WORK_SIDE, smoothMaskEdges, type Guide } from '../../lib/mask/edges'
 import { blendBoundary, cleanupMask, iou, threshold } from '../../lib/mask/ops'
 import { resizeMask } from '../../lib/mask/resample'
 import { isIOS } from '../../lib/platform'
+import { formatResources, releaseCanvas, trackBitmap } from '../../lib/resources'
 import { TimeoutError, withTimeout } from '../../lib/timeout'
 import { guardMl } from '../../ml/crashRecovery'
 import {
+  POSE_LOAD_TIMEOUT_MS,
+  POSE_MAX_SIDE,
+  POSE_TIMEOUT_MS,
   REFINE_AUTO_LIMIT_MS,
   REFINE_LOAD_TIMEOUT_MS,
   REFINE_MAX_SIDE,
   REFINE_TIMEOUT_MS,
+  resolveSegmentationConfig,
   shouldRefine,
 } from '../../ml/mlConfig'
 import type { LoadInfo } from '../../ml/providers'
@@ -42,27 +47,32 @@ export interface PipelineDeps {
   /** The photo's luminance (0–1) at a long side of at most maxSide. */
   luminance(photo: ImageBitmap, maxSide: number): Guide
   ios: boolean
+  poseTimeoutMs: number
   refineTimeoutMs: number
 }
 
 export const browserDeps: PipelineDeps = {
-  copy: (photo, maxSide) => {
+  copy: async (photo, maxSide) => {
     const scale = maxSide ? Math.min(1, maxSide / Math.max(photo.width, photo.height)) : 1
-    if (scale === 1) return createImageBitmap(photo)
-    return createImageBitmap(photo, {
-      resizeWidth: Math.round(photo.width * scale),
-      resizeHeight: Math.round(photo.height * scale),
-      resizeQuality: 'medium',
-    })
+    if (scale === 1) return trackBitmap(await createImageBitmap(photo))
+    return trackBitmap(
+      await createImageBitmap(photo, {
+        resizeWidth: Math.round(photo.width * scale),
+        resizeHeight: Math.round(photo.height * scale),
+        resizeQuality: 'medium',
+      }),
+    )
   },
   luminance: (photo, maxSide) => {
     const scale = Math.min(1, maxSide / Math.max(photo.width, photo.height))
     const width = Math.max(1, Math.round(photo.width * scale))
     const height = Math.max(1, Math.round(photo.height * scale))
-    const ctx = new OffscreenCanvas(width, height).getContext('2d', { willReadFrequently: true })
+    const canvas = new OffscreenCanvas(width, height)
+    const ctx = canvas.getContext('2d', { willReadFrequently: true })
     if (!ctx) throw new Error('Canvas unavailable')
     ctx.drawImage(photo, 0, 0, width, height)
     const rgba = ctx.getImageData(0, 0, width, height).data
+    releaseCanvas(canvas)
     const data = new Float32Array(width * height)
     for (let i = 0; i < data.length; i++) {
       data[i] = (0.299 * (rgba[i * 4] ?? 0) + 0.587 * (rgba[i * 4 + 1] ?? 0) + 0.114 * (rgba[i * 4 + 2] ?? 0)) / 255
@@ -70,6 +80,7 @@ export const browserDeps: PipelineDeps = {
     return { data, width, height }
   },
   ios: isIOS(),
+  poseTimeoutMs: POSE_TIMEOUT_MS,
   refineTimeoutMs: REFINE_TIMEOUT_MS,
 }
 
@@ -77,9 +88,10 @@ export const browserDeps: PipelineDeps = {
 const MIN_REFINE_IOU = 0.6
 
 /**
- * Background removal → cheap edge cleanup → pose → optional SlimSAM refinement, one model at a time.
- * Pose runs before refinement, and a failed or timed-out refinement only costs the refinement: the
- * SegFormer mask is kept. `photo` is not consumed.
+ * Background removal → cheap edge cleanup → pose → optional SlimSAM refinement. Strictly sequential:
+ * each model's worker is terminated before the next model loads, so only one is ever in memory.
+ * Only segmentation is required: a failed or timed-out pose or refinement keeps the mask and adds
+ * a note. `photo` is not consumed.
  */
 export async function processPhoto(
   session: PipelineSession,
@@ -92,12 +104,16 @@ export async function processPhoto(
   const timings: ProcessedPhoto['timings'] = {}
   const notes: string[] = []
   const refine = shouldRefine(ml, deps.ios)
+  const resolved = resolveSegmentationConfig(ml, deps.ios)
   debugLog('pipeline start', {
     photo: `${width}×${height}`,
-    model: ml.model,
-    device: ml.device,
-    dtype: ml.dtype,
+    model: resolved.modelId,
+    device: resolved.device === 'auto' ? 'auto (WebGPU, else WASM)' : resolved.device,
+    dtype: resolved.dtype === 'auto' ? 'auto (fp16 on WebGPU, q8 on WASM)' : resolved.dtype,
     refine,
+    pose: !ml.skipPose,
+    ios: deps.ios,
+    verifiedRuns: ml.iosVerifiedRuns ?? 0,
     webgpuBroken: ml.webgpuBroken ?? false,
   })
 
@@ -129,26 +145,21 @@ export async function processPhoto(
   }
   onStage({ stage: 'segment', status: 'done' })
 
-  // 2. Pose, before any refinement, so a refinement problem can never cost us the pose.
+  // Only one model in memory at a time: free SegFormer (sessions, GPU device, worker) before pose loads.
+  await guardMl({ stage: 'segment', step: 'unload' }, () => session.unloadSegmentation()).catch(() => undefined)
+  debugLog(`segment.unloaded ${formatResources()}`)
+
+  // 2. Pose, before any refinement. Optional: without it the user aligns clothes by hand.
   let landmarks: PoseLandmarks = {}
-  try {
-    const pose = session.poseDetector()
-    await guardMl({ stage: 'pose', step: 'load' }, () =>
-      pose.load((loaded, total) => {
-        onStage({ stage: 'pose', status: 'downloading', loaded, total })
-      }),
-    )
-    onStage({ stage: 'pose', status: 'running' })
-    const res = await guardMl({ stage: 'pose', step: 'run' }, async () => pose.detect(await deps.copy(photo)))
-    landmarks = res.landmarks
-    timings.pose = res.ms
-    if (!landmarks.leftShoulder || !landmarks.rightHip) {
-      notes.push('Couldn’t detect your pose clearly. Clothes may need manual positioning later; a retake may help.')
+  if (ml.skipPose) {
+    notes.push('Pose detection is off on this device, so you’ll line clothes up by hand. You can turn it on in Settings → Advanced.')
+    onStage({ stage: 'pose', status: 'skipped' })
+  } else {
+    const pose = await detectPose(session, photo, onStage, deps, notes)
+    if (pose) {
+      landmarks = pose.landmarks
+      timings.pose = pose.ms
     }
-    onStage({ stage: 'pose', status: 'done' })
-  } catch (err) {
-    notes.push(`Pose detection failed (${errorText(err)}).`)
-    onStage({ stage: 'pose', status: 'failed' })
   }
 
   // 3. Optional SlimSAM refinement
@@ -162,8 +173,61 @@ export async function processPhoto(
     onStage({ stage: 'refine', status: 'skipped' })
   }
 
-  debugLog('pipeline done', { notes: notes.length })
+  if (deps.ios) {
+    // A full photo finished on this device: iOS auto may now step up from the safe start (see resolveSegmentationConfig).
+    const runs = ((await getSettings()).ml.iosVerifiedRuns ?? 0) + 1
+    await updateMlSettings({ iosVerifiedRuns: runs })
+  }
+  debugLog(`pipeline done ${formatResources()}`, { notes: notes.length })
   return { mask, width, height, landmarks, timings, notes }
+}
+
+/**
+ * Runs the Pose Landmarker (lite, CPU delegate, own worker) on a downscaled copy under timeouts, and
+ * always unloads it afterwards. Returns null (and adds a note) on any failure.
+ */
+async function detectPose(
+  session: PipelineSession,
+  photo: ImageBitmap,
+  onStage: (update: StageUpdate) => void,
+  deps: PipelineDeps,
+  notes: string[],
+): Promise<{ landmarks: PoseLandmarks; ms: number } | null> {
+  const ml = session.settings
+  const abort = () => {
+    void session.unloadPose()
+  }
+  try {
+    const pose = session.poseDetector()
+    await guardMl({ stage: 'pose', step: 'load' }, () =>
+      withTimeout(
+        pose.load((loaded, total) => {
+          onStage({ stage: 'pose', status: 'downloading', loaded, total })
+        }),
+        POSE_LOAD_TIMEOUT_MS,
+        'Loading pose detection',
+        abort,
+      ),
+    )
+    onStage({ stage: 'pose', status: 'running' })
+    const small = await deps.copy(photo, POSE_MAX_SIDE)
+    const res = await guardMl({ stage: 'pose', step: 'run' }, () =>
+      withTimeout(pose.detect(small), deps.poseTimeoutMs, 'Detecting pose', abort),
+    )
+    if (!res.landmarks.leftShoulder || !res.landmarks.rightHip) {
+      notes.push('Couldn’t detect your pose clearly. Clothes may need manual positioning later; a retake may help.')
+    }
+    if (ml.poseCrashes) await updateMlSettings({ poseCrashes: 0 })
+    onStage({ stage: 'pose', status: 'done' })
+    return res
+  } catch (err) {
+    notes.push(`Pose detection didn’t finish (${errorText(err)}). Your cut-out is fine; you’ll line clothes up by hand.`)
+    onStage({ stage: 'pose', status: 'failed' })
+    return null
+  } finally {
+    await guardMl({ stage: 'pose', step: 'unload' }, () => session.unloadPose()).catch(() => undefined)
+    debugLog(`pose.unloaded ${formatResources()}`)
+  }
 }
 
 /**
@@ -180,7 +244,6 @@ async function refineWithSam(
 ): Promise<{ mask: Uint8Array; ms: number } | null> {
   const ml = session.settings
   const { width, height } = photo
-  session.releaseForRefine()
   try {
     const refiner = session.edgeRefiner()
     const abort = () => {

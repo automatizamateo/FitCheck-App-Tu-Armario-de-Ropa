@@ -7,13 +7,29 @@ import { DEFAULT_SEGMENTATION_MODEL, LIGHT_SEGMENTATION_MODEL } from './models'
 const ml = DEFAULT_ML_SETTINGS
 
 describe('ML config', () => {
-  it('uses B2 on auto backend by default', () => {
-    expect(resolveSegmentationConfig(ml)).toEqual({ modelId: DEFAULT_SEGMENTATION_MODEL, device: 'auto', dtype: 'auto' })
+  it('uses B2 on auto backend by default outside iOS', () => {
+    expect(resolveSegmentationConfig(ml, false)).toEqual({ modelId: DEFAULT_SEGMENTATION_MODEL, device: 'auto', dtype: 'auto' })
   })
 
   it('falls back to WASM after WebGPU failed, only when on auto', () => {
-    expect(resolveSegmentationConfig({ ...ml, webgpuBroken: true }).device).toBe('wasm')
-    expect(resolveSegmentationConfig({ ...ml, webgpuBroken: true, device: 'webgpu' }).device).toBe('webgpu')
+    expect(resolveSegmentationConfig({ ...ml, webgpuBroken: true }, false).device).toBe('wasm')
+    expect(resolveSegmentationConfig({ ...ml, webgpuBroken: true, device: 'webgpu' }, false).device).toBe('webgpu')
+  })
+
+  it('on iOS, auto starts at the safest setup: B0, WASM, q8', () => {
+    expect(resolveSegmentationConfig(ml, true)).toEqual({ modelId: LIGHT_SEGMENTATION_MODEL, device: 'wasm', dtype: 'q8' })
+  })
+
+  it('on iOS, auto steps up to B2 only after a full run, and never to WebGPU', () => {
+    const proven = { ...ml, iosVerifiedRuns: 1 }
+    expect(resolveSegmentationConfig(proven, true)).toEqual({ modelId: DEFAULT_SEGMENTATION_MODEL, device: 'wasm', dtype: 'q8' })
+    expect(resolveSegmentationConfig({ ...ml, iosVerifiedRuns: 50 }, true).device).toBe('wasm')
+  })
+
+  it('on iOS, explicit choices still win', () => {
+    const explicit: MlSettings = { ...ml, model: DEFAULT_SEGMENTATION_MODEL, device: 'webgpu', dtype: 'fp16' }
+    expect(resolveSegmentationConfig(explicit, true)).toEqual({ modelId: DEFAULT_SEGMENTATION_MODEL, device: 'webgpu', dtype: 'fp16' })
+    expect(resolveSegmentationConfig({ ...ml, device: 'wasm', dtype: 'fp32' }, true).dtype).toBe('fp32')
   })
 
   it('never refines automatically on iOS; only an explicit On enables it there', () => {
@@ -53,7 +69,7 @@ describe('crash step-down', () => {
   })
 
   it('walks refine off → lighter model → CPU, one level per crash, then stops changing', () => {
-    const { results, final } = crashRepeatedly({ ...ml, refineEdges: 'on' }, { stage: 'refine', step: 'run' }, true, 4)
+    const { results, final } = crashRepeatedly({ ...ml, refineEdges: 'on' }, { stage: 'refine', step: 'run' }, false, 4)
     expect(results.map((r) => r.changes)).toEqual([
       { refineEdges: 'off' },
       { model: LIGHT_SEGMENTATION_MODEL },
@@ -66,12 +82,31 @@ describe('crash step-down', () => {
   })
 
   it('a segmentation crash steps the model down first, skipping refine when it was not running', () => {
-    const { results } = crashRepeatedly(ml, { stage: 'segment', step: 'run', device: 'webgpu' }, true, 3)
+    const { results } = crashRepeatedly({ ...ml, refineEdges: 'off' }, { stage: 'segment', step: 'run', device: 'webgpu' }, false, 3)
     expect(results.map((r) => r.changes)).toEqual([{ model: LIGHT_SEGMENTATION_MODEL }, { device: 'wasm', dtype: 'auto' }, {}])
   })
 
-  it('a pose crash also lightens the segmentation model that is still loaded', () => {
-    expect(crashRecovery(ml, { stage: 'pose', step: 'load' }, true).changes).toEqual({ model: LIGHT_SEGMENTATION_MODEL })
+  it('on iOS after a proven run (B2), a segmentation crash goes back to B0', () => {
+    expect(crashRecovery({ ...ml, iosVerifiedRuns: 1 }, { stage: 'segment' }, true).changes).toEqual({
+      model: LIGHT_SEGMENTATION_MODEL,
+    })
+  })
+
+  it('a pose crash drops straight to B0 + WASM; a second one in a row turns pose off', () => {
+    // The reported case: B2 on WebGPU, killed at pose.load.
+    const start: MlSettings = { ...ml, model: DEFAULT_SEGMENTATION_MODEL, device: 'webgpu' }
+    const { results, final } = crashRepeatedly(start, { stage: 'pose', step: 'load' }, true, 2)
+    expect(results[0]?.changes).toEqual({ model: LIGHT_SEGMENTATION_MODEL, device: 'wasm', dtype: 'auto', poseCrashes: 1 })
+    expect(results[1]?.changes).toEqual({ poseCrashes: 2, skipPose: true })
+    expect(results[1]?.notice).toMatch(/pose detection is now off/)
+    expect(final.skipPose).toBe(true)
+  })
+
+  it('a pose crash at the safe iOS default changes nothing the first time, then skips pose', () => {
+    const { results } = crashRepeatedly(ml, { stage: 'pose', step: 'load' }, true, 2)
+    expect(results[0]?.changes).toEqual({ poseCrashes: 1 })
+    expect(results[0]?.steppedDown).toBe(false)
+    expect(results[1]?.changes).toMatchObject({ skipPose: true })
   })
 
   it('skips rungs that would change nothing', () => {

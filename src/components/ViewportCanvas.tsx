@@ -112,7 +112,8 @@ export function ViewportCanvas({
     if (!canvas) return
     const observer = new ResizeObserver(([entry]) => {
       if (!entry) return
-      const dpr = Math.min(window.devicePixelRatio || 1, 3)
+      // 2× is sharp enough for a photo and has 44 % fewer pixels than 3× on iPhone.
+      const dpr = Math.min(window.devicePixelRatio || 1, 2)
       const { width, height } = entry.contentRect
       size.current = { w: width, h: height, dpr }
       canvas.width = Math.round(width * dpr)

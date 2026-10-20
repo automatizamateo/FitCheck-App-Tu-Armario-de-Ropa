@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { releaseCanvas } from '../../lib/resources'
 import type { StageId, StageUpdate } from '../baseModel/processPhoto'
 
 const LABELS: Record<StageId, string> = {
@@ -28,6 +29,7 @@ export function ProcessingScreen({ photo, stages, error, onRetry, onRetake }: Pr
     canvas.height = photo.height
     canvas.getContext('2d')?.drawImage(photo, 0, 0)
     canvas.toBlob((b) => {
+      releaseCanvas(canvas)
       if (!b || revoked) return
       objectUrl = URL.createObjectURL(b)
       setUrl(objectUrl)

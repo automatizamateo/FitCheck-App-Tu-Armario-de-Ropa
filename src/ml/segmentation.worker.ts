@@ -1,5 +1,6 @@
 /// <reference lib="webworker" />
 import {
+  env,
   AutoModel,
   AutoProcessor,
   RawImage,
@@ -27,6 +28,7 @@ configureOnnxRuntime()
 
 let processor: Processor | null = null
 let model: PreTrainedModel | null = null
+let usedWebGPU = false
 
 function post(message: Outbound<WorkerResponse>, transfer: Transferable[] = []) {
   self.postMessage(message, transfer)
@@ -59,6 +61,7 @@ async function handleLoad({ modelId, device, dtype }: Extract<WorkerRequest, { t
     (m) => m.dispose(),
   )
   model = result.model
+  usedWebGPU ||= result.backend.device === 'webgpu'
   post({
     type: 'loaded',
     device: result.backend.device,
@@ -137,9 +140,27 @@ function argmaxChannels(data: Float32Array, channels: number, pixels: number): U
   return out
 }
 
+async function handleDispose() {
+  await model?.dispose() // releases the ONNX sessions and their GPU buffers
+  model = null
+  processor = null
+  if (usedWebGPU) {
+    // ORT keeps one GPUDevice per worker; destroy it so Safari frees GPU memory before the next model loads.
+    try {
+      const webgpu = (env.backends.onnx as { webgpu?: { device?: unknown } }).webgpu
+      const device = (await Promise.resolve(webgpu?.device)) as { destroy?: () => void } | undefined
+      device?.destroy?.()
+    } catch {
+      /* no device was created */
+    }
+  }
+  post({ type: 'disposed' })
+}
+
 self.onmessage = (event: MessageEvent<WorkerRequest>) => {
   const message = event.data
-  const task = message.type === 'load' ? handleLoad(message) : handleSegment(message)
+  const task =
+    message.type === 'load' ? handleLoad(message) : message.type === 'dispose' ? handleDispose() : handleSegment(message)
   task.catch((err: unknown) => {
     post({ type: 'error', message: errorMessage(err) })
   })

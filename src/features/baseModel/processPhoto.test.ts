@@ -7,13 +7,17 @@ import type { PipelineSession } from '../../ml/session'
 import { memoryStorage } from '../../test/memoryStorage'
 import { processPhoto, type PipelineDeps, type StageUpdate } from './processPhoto'
 
-const updateMlSettings = vi.hoisted(() => vi.fn(() => Promise.resolve()))
-vi.mock('../../db/settings', () => ({ updateMlSettings }))
+const settings = vi.hoisted(() => ({
+  updateMlSettings: vi.fn(() => Promise.resolve()),
+  getSettings: vi.fn(() => Promise.resolve({ ml: { iosVerifiedRuns: 2 } })),
+}))
+vi.mock('../../db/settings', () => settings)
 
 const W = 40
 const H = 60
 const INFO: LoadInfo = { modelId: 'seg', device: 'wasm', dtype: 'q8', ms: 1 }
 const LANDMARKS: PoseLandmarks = { leftShoulder: { x: 0.4, y: 0.2, visibility: 1 }, rightHip: { x: 0.5, y: 0.6, visibility: 1 } }
+const never = () => new Promise<never>(() => undefined)
 
 /** A person-shaped probability map: a box in the middle. */
 function personProb(): Uint8Array {
@@ -33,6 +37,7 @@ const deps: PipelineDeps = {
     throw new Error('no canvas in tests')
   },
   ios: true,
+  poseTimeoutMs: 50,
   refineTimeoutMs: 50,
 }
 
@@ -41,33 +46,53 @@ interface FakeOptions {
   refine?: (image: ImageBitmap, mask: Uint8Array, w: number, h: number) => Promise<{ mask: Uint8Array; iou: number; ms: number }>
   refineLoad?: () => Promise<LoadInfo>
   segmentRun?: () => Promise<never>
+  poseLoad?: () => Promise<void>
+  poseRun?: (image: ImageBitmap) => Promise<{ landmarks: PoseLandmarks; ms: number }>
 }
 
+/**
+ * A session whose fake models record what happens to them. Like MlSession, unloading drops the
+ * provider, and using a provider after it was unloaded is recorded as an error.
+ */
 function fakeSession(opts: FakeOptions = {}) {
   const calls: string[] = []
+  const unloaded = new Set<string>()
+  const record = (name: string, what: string) => {
+    calls.push(unloaded.has(name) ? `ERROR ${what} after unload` : what)
+  }
   const seg: SegmentationProvider = {
     modelId: 'seg',
     labels: [],
     personClasses: [1],
     load: () => {
-      calls.push('segment.load')
+      record('segment', 'segment.load')
       return Promise.resolve(INFO)
     },
     segmentGroups: () => {
-      calls.push('segment.run')
+      record('segment', 'segment.run')
       if (opts.segmentRun) return opts.segmentRun()
       return Promise.resolve({ masks: [personProb()], width: W, height: H, ms: 5 })
+    },
+    unload: () => {
+      calls.push('segment.unload')
+      unloaded.add('segment')
+      return Promise.resolve()
     },
     dispose: () => calls.push('segment.dispose'),
   }
   const pose: PoseProvider = {
     load: () => {
-      calls.push('pose.load')
-      return Promise.resolve()
+      record('pose', 'pose.load')
+      return opts.poseLoad ? opts.poseLoad() : Promise.resolve()
     },
-    detect: () => {
-      calls.push('pose.run')
-      return Promise.resolve({ landmarks: LANDMARKS, ms: 3 })
+    detect: (image) => {
+      record('pose', `pose.run ${image.width}×${image.height}`)
+      return opts.poseRun ? opts.poseRun(image) : Promise.resolve({ landmarks: LANDMARKS, ms: 3 })
+    },
+    unload: () => {
+      calls.push('pose.unload')
+      unloaded.add('pose')
+      return Promise.resolve()
     },
     dispose: () => calls.push('pose.dispose'),
   }
@@ -82,15 +107,21 @@ function fakeSession(opts: FakeOptions = {}) {
     },
     dispose: () => calls.push('refine.dispose'),
   }
+  let segLive = false
+  let poseLive = false
   const session: PipelineSession = {
     settings: { ...DEFAULT_ML_SETTINGS, ...opts.ml },
-    segmentation: () => seg,
-    poseDetector: () => pose,
-    edgeRefiner: () => refiner,
-    releaseForRefine: () => {
-      seg.dispose()
-      pose.dispose()
+    segmentation: () => {
+      segLive = true
+      return seg
     },
+    poseDetector: () => {
+      poseLive = true
+      return pose
+    },
+    edgeRefiner: () => refiner,
+    unloadSegmentation: () => (segLive ? ((segLive = false), seg.unload()) : Promise.resolve()),
+    unloadPose: () => (poseLive ? ((poseLive = false), pose.unload()) : Promise.resolve()),
     releaseRefiner: () => {
       refiner.dispose()
     },
@@ -113,37 +144,97 @@ async function baseline() {
 
 beforeEach(() => {
   vi.stubGlobal('localStorage', memoryStorage())
-  updateMlSettings.mockClear()
+  settings.updateMlSettings.mockClear()
 })
 
-describe('processPhoto', () => {
-  it('on iOS with default settings: segment then pose, no refinement', async () => {
-    const { result, calls, final } = await run()
-    expect(calls).toEqual(['segment.load', 'segment.run', 'pose.load', 'pose.run'])
+describe('processPhoto: one model in memory at a time', () => {
+  it('unloads segmentation before pose loads, and pose before finishing (iOS defaults: no refinement)', async () => {
+    const { result, calls, final } = await run({}, { copy: (p) => deps.copy(p) })
+    expect(calls).toEqual(['segment.load', 'segment.run', 'segment.unload', 'pose.load', `pose.run ${W}×${H}`, 'pose.unload'])
     expect(final('refine')).toBe('skipped')
     expect(result.landmarks).toEqual(LANDMARKS)
-    expect(result.mask.reduce((a, b) => a + b, 0)).toBeGreaterThan(0)
   })
 
-  it('when refinement is on: pose first, other models released before SlimSAM loads, SlimSAM released after', async () => {
+  it('with refinement on: segment → unload → pose → unload → SlimSAM → release', async () => {
     const { calls, final } = await run({ ml: { refineEdges: 'on' } }, { copy: (p) => deps.copy(p) })
     expect(calls).toEqual([
       'segment.load',
       'segment.run',
+      'segment.unload',
       'pose.load',
-      'pose.run',
-      'segment.dispose',
-      'pose.dispose',
+      `pose.run ${W}×${H}`,
+      'pose.unload',
       'refine.load',
       `refine.run ${W}×${H}`,
       'refine.dispose',
     ])
+    expect(calls.some((c) => c.startsWith('ERROR'))).toBe(false)
     expect(final('refine')).toBe('done')
   })
 
-  it('sends SlimSAM a downscaled image and mask', async () => {
-    const { calls } = await run({ ml: { refineEdges: 'on' } }, { copy: (p) => deps.copy(p, 20) })
+  it('gives pose and SlimSAM downscaled copies', async () => {
+    const { calls } = await run({ ml: { refineEdges: 'on' } }, { copy: (p, max) => deps.copy(p, max && 20) })
+    expect(calls).toContain('pose.run 13×20')
     expect(calls).toContain('refine.run 13×20')
+  })
+
+  it('logs the resolved config, not "auto", and the unload lines', async () => {
+    await run()
+    const log = readDebugLog().map((e) => e.m)
+    const start = log.find((m) => m.startsWith('pipeline start')) ?? ''
+    expect(start).toContain('"model":"Xenova/segformer_b0_clothes"')
+    expect(start).toContain('"device":"wasm"')
+    expect(start).toContain('"dtype":"q8"')
+    expect(log.some((m) => /^segment\.unloaded \[w\d+ b\d+ c\d+ [\d.]+MB/.test(m))).toBe(true)
+    expect(log.some((m) => m.startsWith('pose.unloaded'))).toBe(true)
+  })
+})
+
+describe('processPhoto: pose never blocks the base model', () => {
+  it('keeps the mask and adds a manual-alignment note when pose loading fails', async () => {
+    const expected = await baseline()
+    const { result, calls, final } = await run({ poseLoad: () => Promise.reject(new Error('wasm failed')) })
+    expect(result.mask).toEqual(expected)
+    expect(result.landmarks).toEqual({})
+    expect(final('pose')).toBe('failed')
+    expect(result.notes.join(' ')).toMatch(/line clothes up by hand/)
+    expect(calls.at(-1)).toBe('pose.unload')
+  })
+
+  it('aborts a pose run that hangs past the timeout', async () => {
+    const expected = await baseline()
+    const { result, calls, final } = await run({ poseRun: never })
+    expect(result.mask).toEqual(expected)
+    expect(final('pose')).toBe('failed')
+    expect(result.notes.join(' ')).toMatch(/longer than/)
+    expect(calls).toContain('pose.unload')
+  })
+
+  it('skips pose entirely when it was turned off after crashes', async () => {
+    const { result, calls, final } = await run({ ml: { skipPose: true } })
+    expect(calls).not.toContain('pose.load')
+    expect(final('pose')).toBe('skipped')
+    expect(result.notes.join(' ')).toMatch(/Pose detection is off/)
+  })
+
+  it('a successful pose clears the crash counter', async () => {
+    await run({ ml: { poseCrashes: 1 } })
+    expect(settings.updateMlSettings).toHaveBeenCalledWith({ poseCrashes: 0 })
+  })
+})
+
+describe('processPhoto: refinement and success bookkeeping', () => {
+  it('records a verified run on iOS so auto can step up next time', async () => {
+    await run()
+    expect(settings.updateMlSettings).toHaveBeenCalledWith({ iosVerifiedRuns: 3 })
+    settings.updateMlSettings.mockClear()
+    await run({}, { ios: false })
+    expect(settings.updateMlSettings).not.toHaveBeenCalledWith(expect.objectContaining({ iosVerifiedRuns: expect.anything() as unknown }))
+  })
+
+  it('does not record a verified run when segmentation fails', async () => {
+    await expect(run({ segmentRun: () => Promise.reject(new Error('boom')) })).rejects.toThrow('boom')
+    expect(settings.updateMlSettings).not.toHaveBeenCalledWith(expect.objectContaining({ iosVerifiedRuns: expect.anything() as unknown }))
   })
 
   it('keeps the SegFormer mask and the pose when refinement throws', async () => {
@@ -159,28 +250,18 @@ describe('processPhoto', () => {
     expect(calls.at(-1)).toBe('refine.dispose')
   })
 
-  it('keeps the SegFormer mask when refinement loading fails', async () => {
+  it('keeps the SegFormer mask when refinement loading fails or hangs', async () => {
     const expected = await baseline()
-    const { result, final } = await run({ ml: { refineEdges: 'on' }, refineLoad: () => Promise.reject(new Error('404')) })
-    expect(result.mask).toEqual(expected)
-    expect(final('refine')).toBe('failed')
-  })
-
-  it('aborts a refinement that hangs past the timeout and falls back', async () => {
-    const expected = await baseline()
-    const { result, calls, final } = await run({
-      ml: { refineEdges: 'on' },
-      refine: () => new Promise(() => undefined), // never settles
-    })
-    expect(result.mask).toEqual(expected)
-    expect(final('refine')).toBe('failed')
-    expect(result.notes.join(' ')).toMatch(/longer than/)
-    expect(calls.filter((c) => c === 'refine.dispose').length).toBeGreaterThanOrEqual(1)
+    expect((await run({ ml: { refineEdges: 'on' }, refineLoad: () => Promise.reject(new Error('404')) })).result.mask).toEqual(expected)
+    const hung = await run({ ml: { refineEdges: 'on' }, refine: never })
+    expect(hung.result.mask).toEqual(expected)
+    expect(hung.final('refine')).toBe('failed')
+    expect(hung.result.notes.join(' ')).toMatch(/longer than/)
   })
 
   it('on auto (desktop), a timed-out refinement is recorded so auto turns it off next time', async () => {
-    await run({ refine: () => new Promise(() => undefined) }, { ios: false })
-    expect(updateMlSettings).toHaveBeenCalledWith({ refineBenchmarkMs: 50 })
+    await run({ refine: never }, { ios: false })
+    expect(settings.updateMlSettings).toHaveBeenCalledWith({ refineBenchmarkMs: 50 })
   })
 
   it('ignores a refinement that disagrees with the SegFormer mask', async () => {
@@ -193,30 +274,45 @@ describe('processPhoto', () => {
     expect(result.notes.join(' ')).toMatch(/didn’t match/)
   })
 
-  it('a failed edge cleanup keeps the plain mask; a failed segmentation fails the photo', async () => {
-    // deps.luminance throws in every test above, so the cleanup fallback is already exercised; check it was logged.
+  it('a failed edge cleanup keeps the plain mask', async () => {
+    // deps.luminance throws, so the cleanup fallback runs in every test; check it was logged.
     await run()
     expect(readDebugLog().some((e) => e.m.startsWith('✗ segment.post'))).toBe(true)
-    await expect(run({ segmentRun: () => Promise.reject(new Error('boom')) })).rejects.toThrow('boom')
   })
+})
 
-  it('writes the in-flight marker before each heavy step and logs each step with its duration', async () => {
+describe('processPhoto: crash markers and log', () => {
+  it('writes the in-flight marker before each heavy step and logs each step with duration and resources', async () => {
     const markers: string[] = []
     const storage = memoryStorage()
     const setItem = storage.setItem.bind(storage)
     storage.setItem = (k, v) => {
-      if (k === 'fitcheck-ml-inflight') markers.push((JSON.parse(v) as { info: { stage: string; step: string } }).info.step)
+      if (k === 'fitcheck-ml-inflight') {
+        const { stage, step } = (JSON.parse(v) as { info: { stage: string; step: string } }).info
+        markers.push(`${stage}.${step}`)
+      }
       setItem(k, v)
     }
     vi.stubGlobal('localStorage', storage)
     const { session } = fakeSession({ ml: { refineEdges: 'on' } })
     await processPhoto(session, fakeBitmap(), () => undefined, deps)
-    expect(markers).toEqual(['load', 'run', 'post', 'load', 'run', 'load', 'run'])
+    expect(markers).toEqual([
+      'segment.load',
+      'segment.run',
+      'segment.post',
+      'segment.unload',
+      'pose.load',
+      'pose.run',
+      'pose.unload',
+      'refine.load',
+      'refine.run',
+    ])
     expect(storage.getItem('fitcheck-ml-inflight')).toBeNull()
     const log = readDebugLog().map((e) => e.m)
     for (const step of ['segment.load', 'segment.run', 'pose.load', 'pose.run', 'refine.load', 'refine.run']) {
-      expect(log.some((m) => m.startsWith(`▶ ${step}`))).toBe(true)
-      expect(log.some((m) => new RegExp(`^✓ ${step.replace('.', '\\.')} \\d+ ms$`).test(m))).toBe(true)
+      const escaped = step.replace('.', '\\.')
+      expect(log.some((m) => new RegExp(`^▶ ${escaped}.* \\[w\\d+ b\\d+ c\\d+ [\\d.]+MB.*\\]$`).test(m))).toBe(true)
+      expect(log.some((m) => new RegExp(`^✓ ${escaped} \\d+ ms \\[w\\d+ b\\d+ c\\d+ [\\d.]+MB.*\\]$`).test(m))).toBe(true)
     }
   })
 })

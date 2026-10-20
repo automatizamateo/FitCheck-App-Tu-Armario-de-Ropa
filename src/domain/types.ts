@@ -145,6 +145,9 @@ export interface MlSettings {
   refineEdges: 'auto' | 'on' | 'off' // auto = off on iOS; elsewhere on until a run is too slow
   refineBenchmarkMs?: number // last edge-refinement time on this device
   webgpuBroken?: boolean // WebGPU failed to load or run inside the worker
+  iosVerifiedRuns?: number // full photo runs completed on this iPhone/iPad; auto steps up only after one
+  poseCrashes?: number // consecutive launches killed during pose detection
+  skipPose?: boolean // pose detection off (after it killed the page twice); clothes are aligned by hand
   lastUsed?: { modelId: string; device: 'webgpu' | 'wasm'; dtype: MlDtype }
   pendingNotice?: string // shown once, then cleared
 }

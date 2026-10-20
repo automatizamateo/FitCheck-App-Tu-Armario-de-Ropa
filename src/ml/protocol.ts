@@ -16,6 +16,8 @@ export interface LoadedMessage {
 // Segmentation worker
 export type WorkerRequest =
   | { type: 'load'; modelId: string; device: Device; dtype: Dtype | 'auto' }
+  /** Releases the ONNX sessions (and the WebGPU device, if one was used) before the worker is terminated. */
+  | { type: 'dispose' }
   | {
       type: 'segment'
       image: ImageBitmap
@@ -36,7 +38,11 @@ export interface SegmentResultMessage {
   timings: { preprocess: number; inference: number; postprocess: number }
 }
 
-export type WorkerResponse = LoadedMessage | SegmentResultMessage
+export interface DisposedMessage {
+  type: 'disposed'
+}
+
+export type WorkerResponse = LoadedMessage | SegmentResultMessage | DisposedMessage
 
 // Edge refiner (SlimSAM) worker
 export type SamRequest =
@@ -53,6 +59,9 @@ export interface RefineResultMessage {
 export type SamResponse = LoadedMessage | RefineResultMessage
 
 // Pose worker
-export type PoseRequest = { type: 'load' } | { type: 'detect'; image: ImageBitmap }
+export type PoseRequest = { type: 'load' } | { type: 'detect'; image: ImageBitmap } | { type: 'dispose' }
 
-export type PoseResponse = { type: 'loaded'; ms: number } | { type: 'pose'; landmarks: PoseLandmarks; ms: number }
+export type PoseResponse =
+  | { type: 'loaded'; ms: number }
+  | { type: 'pose'; landmarks: PoseLandmarks; ms: number }
+  | DisposedMessage
